@@ -1,8 +1,8 @@
 <?php
 
-namespace Amirhellboy\FilamentFileManager\Providers;
+namespace Lrony94\FilamentFileManager\Providers;
 
-use Amirhellboy\FilamentFileManager\Http\Middleware\AccessPanelPermission;
+use Lrony94\FilamentFileManager\Http\Middleware\AccessPanelPermission;
 use Spatie\LaravelPackageTools\Commands\InstallCommand;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
@@ -40,14 +40,14 @@ class FileManagerServiceProvider extends PackageServiceProvider
         // Load package views
         $this->loadViewsFrom(__DIR__ . '/../../resources/views', 'filament-filemanager');
         // Load package routes
-        \Amirhellboy\FilamentFileManager\Controllers\FileManagerController::routes();
+        \Lrony94\FilamentFileManager\Controllers\FileManagerController::routes();
 
         app('router')->aliasMiddleware('filemanger.permission', AccessPanelPermission::class);
     }
 
     protected function getAssetPackageName(): ?string
     {
-        return 'amirhellboy/filament-filemanager';
+        return 'Lrony94/filament-filemanager';
     }
 
 }

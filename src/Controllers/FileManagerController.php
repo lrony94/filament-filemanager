@@ -1,8 +1,8 @@
 <?php
 
-namespace Amirhellboy\FilamentFileManager\Controllers;
+namespace Lrony94\FilamentFileManager\Controllers;
 
-use Amirhellboy\FilamentFileManager\Http\Middleware\AccessPanelPermission;
+use Lrony94\FilamentFileManager\Http\Middleware\AccessPanelPermission;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
