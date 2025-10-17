@@ -8,13 +8,13 @@
 1-Install the package via composer
 
 ```bash
-composer require amirhellboy/filament-filemanager
+composer require lrony94/filament-filemanager
 ```
 
 2-Publish assets
 
 ```bash
-php artisan vendor:publish --provider="Amirhellboy\FilamentFileManager\Providers\FileManagerServiceProvider"
+php artisan vendor:publish --provider="Lrony94\FilamentFileManager\Providers\FileManagerServiceProvider"
 ```
 
 
@@ -23,12 +23,12 @@ php artisan vendor:publish --provider="Amirhellboy\FilamentFileManager\Providers
 The editor extends the default Field class so most other methods available on that class can be used when adding it to a form.
 
 ```php
-use Amirhellboy\FilamentFileManager\Forms\Components\FileManagerPicker;
+use Lrony94\FilamentFileManager\Forms\Components\FileManagerPicker;
 
 FileManagerPicker::make('avatar')
 	->columnSpanFull()
 	->required()
-	->label('انتخاب فایل'),
+	->label('Avatar'),
 ```
 
 ## Config

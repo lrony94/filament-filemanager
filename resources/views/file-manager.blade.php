@@ -238,12 +238,12 @@
         }
 
         .row-selected {
-            background: #111827;
-            color: #fff;
+            background: #eef2ff; /* lighter highlight */
+            color: #111827;
         }
 
         .row-selected td {
-            color: #fff;
+            color: #111827;
         }
     </style>
 </head>
@@ -272,6 +272,7 @@
             Delete
         </button>
         <button class="view-toggle" onclick="unselectAll()">Unselect All</button>
+        <button id="useSelectedBtn" class="view-toggle" style="display:none;background:#16a34a;color:#fff;border-color:#15803d" onclick="useSelected()">Use Selected</button>
     </div>
 </div>
 <div class="breadcrumbs">
@@ -306,6 +307,12 @@
     function selectFile(payload) {
         // normalize payload to object { url, path }
         const data = (typeof payload === 'string') ? {url: payload} : (payload || {});
+        // Persist parent folder of the selected file (or current folder as fallback)
+        try {
+            const p = (data.path || '').toString();
+            const parent = p ? normalizePath(p).split('/').slice(0, -1).join('/') : normalizePath(currentPath || '');
+            localStorage.setItem('ffm:lastPath', parent);
+        } catch (e) {}
         // Check if opened from Filament (popup)
         if (window.opener && window.opener.__fileManagerSelectCallback) {
             try {
@@ -334,10 +341,15 @@
 
     const currentPath = @js($path ?? '');
     const currentDisk = @js($disk ?? 'local');
+    const isMultipleMode = (new URL(window.location.href)).searchParams.get('multiple') === '1';
+    // Remember last visited path on load for next openings
+    try { localStorage.setItem('ffm:lastPath', (currentPath || '')); } catch (e) {}
 
     function goTo(path) {
         const url = new URL(window.location.href);
         if (path) url.searchParams.set('path', normalizePath(path)); else url.searchParams.delete('path');
+        // Persist target path before navigation
+        try { localStorage.setItem('ffm:lastPath', normalizePath(path || '')); } catch (e) {}
         window.location.href = url.toString();
     }
 
@@ -478,6 +490,7 @@
     const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'];
     let view = 'list';
     let selected = new Set();
+    const clickTimers = Object.create(null);
 
     function toggleView() {
         view = view === 'list' ? 'grid' : 'list';
@@ -532,9 +545,10 @@
                     ? `<span style="display:inline-flex;width:28px;height:28px;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></span>`
                     : (isImg ? `<img src="/filament-filemanager/file-preview/${base64url(f.path)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:8px;">` : `<span style="display:inline-flex;width:28px;height:28px;border:1px solid #e5e7eb;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;">📄</span>`);
                 const mid = base64Id(f.path);
-                tr.innerHTML = `
-                        <td><input type=\"checkbox\" data-path=\"${f.path}\" ${selected.has(f.path) ? 'checked' : ''}></td>
-                        <td style=\"display:flex;align-items:center;\">${icon}<span style=\"cursor:pointer;color:#111827;\" onclick=\"${f._type === 'dir' ? `goTo('${f.path}')` : `selectFile({url: '${(f.url || '').replace(/'/g, "\\'")}', path: '${(f.path || '').replace(/'/g, "\\'")}'})`}\">${f.name}</span></td>
+                const checkboxCell = f._type === 'file' ? `<input type=\"checkbox\" data-type=\"file\" data-path=\"${f.path}\" ${selected.has(f.path) ? 'checked' : ''}>` : '';
+        tr.innerHTML = `
+            <td>${checkboxCell}</td>
+            <td style=\"display:flex;align-items:center;\">${icon}<span style=\"cursor:pointer;color:#111827;\" onclick=\"onItemClick('${f._type}','${(f.path || '').replace(/'/g, "\\'")}','${(f.url || '').replace(/'/g, "\\'")}')\" ondblclick=\"onItemDblClick('${f._type}','${(f.path || '').replace(/'/g, "\\'")}','${(f.url || '').replace(/'/g, "\\'")}')\">${f.name}</span></td>
                         <td class=\"right\">${f._type === 'dir' ? '—' : formatSize(f.size)}</td>
                         <td>${formatTime(f.mtime)}</td>
                         <td class=\"right\">
@@ -549,8 +563,8 @@
                 if (selected.has(f.path)) tr.classList.add('row-selected');
                 body.appendChild(tr);
             });
-            // attach checkbox listeners
-            body.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            // attach checkbox listeners (files only)
+            body.querySelectorAll('input[type="checkbox"][data-type="file"]').forEach(cb => {
                 cb.addEventListener('change', (e) => {
                     const p = normalizePath(e.target.getAttribute('data-path'));
                     if (e.target.checked) selected.add(p); else selected.delete(p);
@@ -564,7 +578,8 @@
             data.forEach(f => {
                 const card = document.createElement('div');
                 card.className = 'card';
-                card.onclick = () => f._type === 'dir' ? goTo(f.path) : selectFile({url: f.url, path: f.path});
+                card.onclick = () => onItemClick(f._type, f.path, f.url);
+                card.ondblclick = () => onItemDblClick(f._type, f.path, f.url);
                 const isImg = f._type === 'file' && imageExts.includes(f.ext);
                 const content = f._type === 'dir'
                     ? `<div class="thumb"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="96" height="72"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></div>`
@@ -586,6 +601,7 @@
         const count = selected.size;
         document.getElementById('selCount').textContent = count;
         bar.style.display = count ? 'flex' : 'none';
+        document.getElementById('useSelectedBtn').style.display = (isMultipleMode && count) ? 'inline-block' : 'none';
         // re-render to update row highlight
         const q = (document.getElementById('search')?.value || '').toLowerCase();
         const folders = initialDirs
@@ -609,6 +625,30 @@
         selected.clear();
         updateSelectionUI();
         render();
+    }
+
+    function toggleSelect(path, url) {
+        const p = normalizePath(path);
+        if (selected.has(p)) selected.delete(p); else selected.add(p);
+        updateSelectionUI();
+    }
+
+    function useSelected() {
+        if (!selected.size) return;
+        const payloads = Array.from(selected).map(p => ({ path: p, url: (initialFiles.find(f=>normalizePath(f.path)===normalizePath(p))||{}).url || '' }));
+        // Persist current folder as last path for future openings
+        try { localStorage.setItem('ffm:lastPath', normalizePath(currentPath || '')); } catch (e) {}
+        if (window.opener && window.opener.__fileManagerSelectCallback) {
+            try { window.opener.__fileManagerSelectCallback(payloads); } catch (_) {}
+            try { window.opener.postMessage({ fileManagerSelected: payloads }, '*'); } catch (_) {}
+            window.close();
+            return;
+        }
+        if (window.self !== window.top) {
+            window.parent.postMessage({ fileManagerSelected: payloads }, '*');
+            return;
+        }
+        window.parent.postMessage({ mceAction: 'fileSelected', url: (payloads[0]||{}).url || '' }, '*');
     }
 
     async function bulkDelete() {
@@ -655,12 +695,39 @@
     }
 
     function toggleAll(master) {
-        document.querySelectorAll('#filesTbody input[type="checkbox"]').forEach(cb => {
+        document.querySelectorAll('#filesTbody input[type="checkbox"][data-type="file"]').forEach(cb => {
             cb.checked = master.checked;
             const p = normalizePath(cb.getAttribute('data-path'));
             if (master.checked) selected.add(p); else selected.delete(p);
         });
         updateSelectionUI();
+    }
+
+    function onItemClick(type, path, url) {
+        const p = normalizePath(path || '');
+        if (type === 'dir') { goTo(p); return; }
+
+        if (!isMultipleMode) {
+            // 单选：立即回填
+            selectFile({ url: url, path: p });
+            return;
+        }
+
+        // 多选：延时触发，若发生双击则取消该延时
+        if (clickTimers[p]) { clearTimeout(clickTimers[p]); }
+        clickTimers[p] = setTimeout(() => {
+            toggleSelect(p, url);
+            delete clickTimers[p];
+        }, 220);
+    }
+
+    function onItemDblClick(type, path, url) {
+        const p = normalizePath(path || '');
+        // 取消等待中的单击动作
+        if (clickTimers[p]) { clearTimeout(clickTimers[p]); delete clickTimers[p]; }
+        if (type === 'dir') { goTo(p); return; }
+        // 直接回填
+        selectFile({ url: url, path: p });
     }
 
     function toggleAddMenu(e) {
@@ -750,8 +817,13 @@
                     mtime: data.mtime,
                 });
                 render();
-                // and insert to editor immediately
-                selectFile({url: data.url, path: data.path});
+                // 在单选模式下立即返回；多选模式仅加入列表与勾选
+                if (!isMultipleMode) {
+                    selectFile({url: data.url, path: data.path});
+                } else {
+                    selected.add(normalizePath(data.path));
+                    updateSelectionUI();
+                }
             } catch (err) {
                 alert('Upload failed');
                 console.error(err);
