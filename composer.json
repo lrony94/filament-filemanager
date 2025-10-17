@@ -1,0 +1,33 @@
+{
+  "name": "amirhellboy/filament-filemanager",
+  "description": "File Manager for Filament",
+  "license": "MIT",
+  "keywords": [
+    "laravel",
+    "filament",
+    "filemanager"
+  ],
+  "authors": [
+    {
+      "name": "amirhellboy",
+      "email": "amirhellboy31@yahoo.com"
+    }
+  ],
+  "require": {
+    "php": "^8.1",
+    "spatie/laravel-package-tools": "^1"
+  },
+  "require-dev": {},
+  "autoload": {
+    "psr-4": {
+      "Amirhellboy\\FilamentFileManager\\": "src/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Amirhellboy\\FilamentFileManager\\Providers\\FileManagerServiceProvider"
+      ]
+    }
+  }
+}
