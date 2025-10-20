@@ -1,12 +1,12 @@
 <?php
 
-namespace Amirhellboy\FilamentFileManager\Http\Middleware;
+namespace Lrony94\FilamentFileManager\Http\Middleware;
 
 use Closure;
 use Filament\Facades\Filament;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-// use Amirhellboy\FilamentTinymceEditor\Models\TinymcePermission;
+// use Lrony94\FilamentTinymceEditor\Models\TinymcePermission;
 
 class AccessPanelPermission
 {

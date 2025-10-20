@@ -680,9 +680,10 @@
     setTimeout(window.__reinitializeFileManagerPickers, 200);
     
     // Helper: initialize previews for all FileManager inputs on the page
-    if (!window.__ffm_initAllPreviews) {
+        if (!window.__ffm_initAllPreviews) {
         window.__ffm_initAllPreviews = function () {
-            const allInputs = document.querySelectorAll('input[id^="form."][data-return]');
+            // Use a broad selector so we catch FileManagerPicker inputs in modals, repeaters or other contexts
+            const allInputs = document.querySelectorAll('input[data-return]');
             allInputs.forEach(input => {
                 if (!input.value) return;
                 const fieldId = input.id;
@@ -768,5 +769,16 @@
             Livewire.hook('commit', ({ succeed }) => { succeed(() => setTimeout(window.__ffm_initAllPreviews, 0)); });
         } catch (e) {}
     }
+
+        // Also trigger re-init when compare mode radios change (covers switching other widget radios that may cause partial DOM updates)
+        document.addEventListener('change', function(e){
+            try {
+                const name = e.target && e.target.name ? String(e.target.name) : '';
+                if (/compare_.*_mode/.test(name)) {
+                    // slight delay to allow Livewire to update DOM
+                    setTimeout(function(){ if (typeof window.__ffm_initAllPreviews === 'function') window.__ffm_initAllPreviews(); }, 30);
+                }
+            } catch (err) { /* ignore */ }
+        });
 </script>
 @endscript
