@@ -314,17 +314,31 @@
             localStorage.setItem('ffm:lastPath', parent);
         } catch (e) {}
         // Check if opened from Filament (popup)
-        if (window.opener && window.opener.__fileManagerSelectCallback) {
-            try {
-                window.opener.__fileManagerSelectCallback(data);
-            } catch (_) {}
-            // Also try postMessage to opener for robustness
-            try {
-                window.opener.postMessage({ fileManagerSelected: data }, '*');
-            } catch (_) {}
-            window.close();
-            return;
-        }
+            if (window.opener) {
+                // Prefer per-instance callback map when provided via cb URL parameter
+                try {
+                    const urlParams = new URLSearchParams(window.location.search || '');
+                    const cb = urlParams.get('cb');
+                    if (cb && window.opener.__fileManagerSelectCallbacks && typeof window.opener.__fileManagerSelectCallbacks[cb] === 'function') {
+                        try { window.opener.__fileManagerSelectCallbacks[cb](data); } catch (e) { /* ignore */ }
+                        try { window.opener.postMessage({ fileManagerSelected: data }, '*'); } catch (e) { /* ignore */ }
+                        window.close();
+                        return;
+                    }
+                } catch (e) {
+                    // ignore parsing errors and fallback to legacy
+                }
+
+                // Legacy single-callback support
+                if (window.opener.__fileManagerSelectCallback) {
+                    try {
+                        window.opener.__fileManagerSelectCallback(data);
+                    } catch (_) {}
+                    try { window.opener.postMessage({ fileManagerSelected: data }, '*'); } catch (_) {}
+                    window.close();
+                    return;
+                }
+            }
         // Check if opened in an iframe (for Filament modal)
         if (window.self !== window.top) {
             window.parent.postMessage({
@@ -638,11 +652,24 @@
         const payloads = Array.from(selected).map(p => ({ path: p, url: (initialFiles.find(f=>normalizePath(f.path)===normalizePath(p))||{}).url || '' }));
         // Persist current folder as last path for future openings
         try { localStorage.setItem('ffm:lastPath', normalizePath(currentPath || '')); } catch (e) {}
-        if (window.opener && window.opener.__fileManagerSelectCallback) {
-            try { window.opener.__fileManagerSelectCallback(payloads); } catch (_) {}
-            try { window.opener.postMessage({ fileManagerSelected: payloads }, '*'); } catch (_) {}
-            window.close();
-            return;
+        if (window.opener) {
+            try {
+                const urlParams = new URLSearchParams(window.location.search || '');
+                const cb = urlParams.get('cb');
+                if (cb && window.opener.__fileManagerSelectCallbacks && typeof window.opener.__fileManagerSelectCallbacks[cb] === 'function') {
+                    try { window.opener.__fileManagerSelectCallbacks[cb](payloads); } catch (e) { /* ignore */ }
+                    try { window.opener.postMessage({ fileManagerSelected: payloads }, '*'); } catch (e) { /* ignore */ }
+                    window.close();
+                    return;
+                }
+            } catch (e) { /* ignore */ }
+
+            if (window.opener.__fileManagerSelectCallback) {
+                try { window.opener.__fileManagerSelectCallback(payloads); } catch (_) {}
+                try { window.opener.postMessage({ fileManagerSelected: payloads }, '*'); } catch (_) {}
+                window.close();
+                return;
+            }
         }
         if (window.self !== window.top) {
             window.parent.postMessage({ fileManagerSelected: payloads }, '*');
