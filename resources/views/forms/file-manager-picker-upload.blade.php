@@ -122,7 +122,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
             id="{{ $getId() }}"
             name="{{ $getName() }}"
             {{ $applyStateBindingModifiers('wire:model') }}="{{ $getStatePath() }}"
-            value="{{ $getState() }}"
+            value="{{ is_array($getState()) ? json_encode($getState(), JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) : ($getState() ?? '') }}"
         />
     </div>
 </x-dynamic-component>
