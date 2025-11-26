@@ -24,10 +24,6 @@ class FileManagerPicker extends Field
     // For debugging: log when multiple() is explicitly called
     public function setMultipleDebug(bool $condition = true): static
     {
-        Log::debug('FileManagerPicker::setMultipleDebug called', [
-            'name' => $this->getName() ?? null,
-            'condition' => $condition,
-        ]);
         $this->isMultiple = $condition;
         return $this;
     }

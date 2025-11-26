@@ -26,13 +26,7 @@ class FileManagerController
                     try {
                         $path = urldecode(base64_decode(strtr($encodedPath, '-_', '+/')));
                         $disk = config('filament-filemanager.disk', 'local');
-                        
-                        \Log::info('[FFM] File preview request:', [
-                            'encodedPath' => $encodedPath,
-                            'decodedPath' => $path,
-                            'disk' => $disk
-                        ]);
-                        
+
                         if (!Storage::disk($disk)->exists($path)) {
                             \Log::error('[FFM] File not found:', [
                                 'disk' => $disk,
@@ -50,10 +44,6 @@ class FileManagerController
                             }
                             
                             $mimeType = mime_content_type($filePath);
-                            \Log::info('[FFM] Serving file:', [
-                                'filePath' => $filePath,
-                                'mimeType' => $mimeType
-                            ]);
                             
                             return response()->file($filePath, [
                                 'Content-Type' => $mimeType,
