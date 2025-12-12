@@ -11,6 +11,13 @@ class FileManagerPicker extends Field
     protected string $view = 'filament-filemanager::forms.file-manager-picker-upload';
 
     protected bool $isMultiple = false;
+    /**
+     * 静态或动态提供的预览数据。可以是：
+     * - null: 使用默认行为（通过 file-preview 路由/previewBase 构造预览 URL）
+     * - array: 直接作为前端的 previewData
+     * - callable: 接受 record 参数并返回数组
+     */
+    protected $previewData = null;
 
     /**
      * 启用多选模式。
@@ -31,6 +38,32 @@ class FileManagerPicker extends Field
     public function isMultiple(): bool
     {
         return $this->isMultiple;
+    }
+
+    /**
+     * 设置 previewData，可以传入数组或 Closure
+     */
+    public function previewData($data): static
+    {
+        $this->previewData = $data;
+        return $this;
+    }
+
+    /**
+     * 在视图中获取已解析的 previewData。如果是 callable，会传入当前 record
+     */
+    public function getPreviewData()
+    {
+        if (is_callable($this->previewData)) {
+            try {
+                return call_user_func($this->previewData, $this->getRecord());
+            } catch (\Throwable $e) {
+                // 避免在表单渲染阶段抛出异常，记录并回退为 null
+                Log::warning('FileManagerPicker previewData resolver failed: ' . $e->getMessage());
+                return null;
+            }
+        }
+        return $this->previewData;
     }
 
     protected function setUp(): void

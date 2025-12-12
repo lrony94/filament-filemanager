@@ -1,5 +1,5 @@
 @php
-    $jsId = str_replace(['.', '[', ']','-'], '_', $getId());
+    $jsId = str_replace(['.', '[', ']', '-'], '_', $getId());
     $multiple = method_exists($field, 'isMultiple') ? $field->isMultiple() : false;
     $pickerOpts = json_encode([
         'jsId' => $jsId,
@@ -8,6 +8,12 @@
         'openUrl' => route('filament-filemanager.file-manager'),
         'previewSelector' => 'file-preview-' . $getId(),
         'inputId' => $getId(),
+        // package config-driven options
+        'previewBase' => config('filament-filemanager.preview_base'),
+        'enableDownload' => config('filament-filemanager.enable_download', true),
+        'downloadBase' => config('filament-filemanager.download_base'),
+        // previewData can be provided by the field via ->previewData([...]) or ->previewData(fn($record){})
+        'previewData' => method_exists($field, 'getPreviewData') ? $field->getPreviewData() : null,
     ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 @endphp
 
@@ -15,40 +21,297 @@
 <script>
 // Inline minimal initializer to avoid needing external asset publishing
 window.fileManagerPickerUploadComponent = function (opts) {
-    const { jsId, statePath, isMultiple, openUrl, previewSelector, inputId } = opts;
+    const {
+        jsId,
+        statePath,
+        isMultiple,
+        openUrl,
+        previewSelector,
+        inputId,
+        previewBase,
+        enableDownload,
+        downloadBase,
+        previewData,
+    } = opts;
 
     function parseValue(v) {
         if (!v) return isMultiple ? [] : '';
         if (isMultiple) {
-            try { return JSON.parse(v); } catch (e) { return []; }
+            try {
+                return JSON.parse(v);
+            } catch (e) {
+                return [];
+            }
         }
         return v;
     }
 
+    // API methods (closure-scoped) — will be invoked via event delegation
+    const api = {
+        removeIndex(idx) {
+            try {
+                const el = document.getElementById(inputId);
+                if (!el) return;
+
+                let arr = [];
+                try {
+                    arr = JSON.parse(el.value || '[]') || [];
+                } catch (e) {
+                    arr = [];
+                }
+
+                if (Array.isArray(arr)) {
+                    arr.splice(idx, 1);
+                    el.value = JSON.stringify(arr);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+
+                try {
+                    if (typeof previewData === 'object' && previewData) {
+                        if (Array.isArray(previewData.thumb)) {
+                            try { previewData.thumb.splice(idx, 1); } catch (e) {}
+                        }
+                        if (Array.isArray(previewData.origin)) {
+                            try { previewData.origin.splice(idx, 1); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+
+                renderPreview(el.value);
+            } catch (e) {
+                console.error(e);
+            }
+        },
+
+        clearAll() {
+            try {
+                const el = document.getElementById(inputId);
+                if (!el) return;
+
+                el.value = isMultiple ? '[]' : '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+
+                try {
+                    if (typeof previewData === 'object' && previewData) {
+                        if (Array.isArray(previewData.thumb)) {
+                            try { previewData.thumb.splice(0, previewData.thumb.length); } catch (e) {}
+                        }
+                        if (Array.isArray(previewData.origin)) {
+                            try { previewData.origin.splice(0, previewData.origin.length); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+
+                renderPreview(el.value);
+            } catch (e) {
+                console.error(e);
+            }
+        },
+    };
+
     function renderPreview(value) {
         const el = document.getElementById(previewSelector);
         if (!el) return;
+
+        // Clear existing content
+        el.innerHTML = '';
+
         if (isMultiple) {
             const arr = parseValue(value) || [];
             if (!arr.length) { el.innerHTML = ''; return; }
-            let html = '<div style="display:flex;flex-wrap:wrap;gap:10px;">';
+
+            const wrapper = document.createElement('div');
+            wrapper.style.display = 'flex';
+            wrapper.style.flexWrap = 'wrap';
+            wrapper.style.gap = '10px';
+
             arr.forEach((v, idx) => {
-                const u = /^https?:\/\//i.test(v) || v.startsWith('/') ? v : ('/filament-filemanager/file-preview/' + btoa(unescape(encodeURIComponent(String(v)))).replace(/=/g, ''));
                 const name = String(v).split('/').pop();
-                html += `<div style="width:120px;position:relative">` +
-                    `<a href="${u}" target="_blank" style="display:block"><img src="${u}" style="width:120px;height:90px;object-fit:cover;border-radius:8px;display:block;"></a>` +
-                    `<button type=\"button\" onclick=\"(function(){var el=document.getElementById('${inputId}'); try{ var arr_=JSON.parse(el.value||'[]'); if(Array.isArray(arr_)){ arr_.splice(${idx},1); el.value=JSON.stringify(arr_); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); } }catch(e){} })()\" style=\"position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.6);color:#fff;border:0;border-radius:6px;padding:4px 6px;cursor:pointer\">✕</button>` +
-                    `<div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>` +
-                    `</div>`;
+
+                // Find corresponding thumb/origin in previewData
+                let thumbs = null;
+                let origins = null;
+                try {
+                    if (previewData) {
+                        if (Array.isArray(previewData)) {
+                            const item = previewData[idx] || previewData.find(p => p && (p.value === v || p.value === String(v)));
+                            if (item) { thumbs = item.thumb || null; origins = item.origin || null; }
+                        } else if (previewData.thumb && previewData.origin && Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
+                            thumbs = previewData.thumb[idx] || null;
+                            origins = previewData.origin[idx] || null;
+                        } else if (previewData[v]) {
+                            thumbs = previewData[v].thumb || null;
+                            origins = previewData[v].origin || null;
+                        }
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+
+                let previewUrl = null;
+                if (thumbs) previewUrl = Array.isArray(thumbs) ? thumbs[0] : thumbs;
+                if (!previewUrl) {
+                    const encoded = btoa(unescape(encodeURIComponent(String(v)))).replace(/=/g, '');
+                    previewUrl = /^https?:\/\//i.test(v) || v.startsWith('/')
+                        ? v
+                        : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + encoded) : ('/filament-filemanager/file-preview/' + encoded));
+                }
+
+                let downloadUrl = null;
+                if (origins) downloadUrl = Array.isArray(origins) ? origins[0] : origins;
+                if (downloadUrl) {
+                    if (!/^https?:\/\//i.test(downloadUrl) && !downloadUrl.startsWith('/')) {
+                        downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(downloadUrl))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(downloadUrl)));
+                    }
+                } else {
+                    downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(v))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(v)));
+                }
+
+                const itemDiv = document.createElement('div');
+                itemDiv.style.width = '120px';
+                itemDiv.style.position = 'relative';
+
+                const a = document.createElement('a');
+                a.href = previewUrl;
+                a.target = '_blank';
+                a.style.display = 'block';
+
+                const img = document.createElement('img');
+                img.src = previewUrl;
+                img.style.width = '120px';
+                img.style.height = '90px';
+                img.style.objectFit = 'cover';
+                img.style.borderRadius = '8px';
+                img.style.display = 'block';
+                a.appendChild(img);
+                itemDiv.appendChild(a);
+
+                if (enableDownload) {
+                    const dl = document.createElement('a');
+                    dl.href = downloadUrl;
+                    dl.target = '_blank';
+                    dl.style.position = 'absolute';
+                    dl.style.left = '6px';
+                    dl.style.top = '6px';
+                    dl.style.background = 'rgba(0,0,0,0.6)';
+                    dl.style.color = '#fff';
+                    dl.style.borderRadius = '6px';
+                    dl.style.padding = '4px 6px';
+                    dl.style.fontSize = '12px';
+                    dl.style.textDecoration = 'none';
+                    dl.textContent = '⬇';
+                    itemDiv.appendChild(dl);
+                }
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.textContent = '✕';
+                delBtn.className = 'fm-delete';
+                delBtn.setAttribute('data-idx', idx);
+                delBtn.style.position = 'absolute';
+                delBtn.style.top = '6px';
+                delBtn.style.right = '6px';
+                delBtn.style.background = 'rgba(0,0,0,0.6)';
+                delBtn.style.color = '#fff';
+                delBtn.style.border = '0';
+                delBtn.style.borderRadius = '6px';
+                delBtn.style.padding = '4px 6px';
+                delBtn.style.cursor = 'pointer';
+                itemDiv.appendChild(delBtn);
+
+                const nameDiv = document.createElement('div');
+                nameDiv.style.fontSize = '12px';
+                nameDiv.style.overflow = 'hidden';
+                nameDiv.style.textOverflow = 'ellipsis';
+                nameDiv.style.whiteSpace = 'nowrap';
+                nameDiv.textContent = name;
+                itemDiv.appendChild(nameDiv);
+
+                wrapper.appendChild(itemDiv);
             });
-            html += '</div>';
-            el.innerHTML = html;
+
+            el.appendChild(wrapper);
             return;
         }
+
+        // single
         if (!value) { el.innerHTML = ''; return; }
-        const u = /^https?:\/\//i.test(value) || value.startsWith('/') ? value : ('/filament-filemanager/file-preview/' + btoa(unescape(encodeURIComponent(String(value)))).replace(/=/g, ''));
+
+        let singleThumb = null;
+        let singleOrigin = null;
+        if (previewData) {
+            try {
+                if (previewData.thumb && previewData.origin) {
+                    singleThumb = Array.isArray(previewData.thumb) ? previewData.thumb[0] : previewData.thumb;
+                    singleOrigin = Array.isArray(previewData.origin) ? previewData.origin[0] : previewData.origin;
+                } else if (previewData.value === value) {
+                    singleThumb = previewData.thumb || null;
+                    singleOrigin = previewData.origin || null;
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        const encoded = btoa(unescape(encodeURIComponent(String(value)))).replace(/=/g, '');
+        const u = singleThumb
+            ? (/^https?:\/\//i.test(singleThumb) || singleThumb.startsWith('/') ? singleThumb : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + singleThumb) : ('/filament-filemanager/file-preview/' + encoded)))
+            : (/^https?:\/\//i.test(value) || value.startsWith('/') ? value : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + encoded) : ('/filament-filemanager/file-preview/' + encoded)));
         const name = String(value).split('/').pop();
-        el.innerHTML = `<div style="max-width:100%;background:#222;padding:8px;border-radius:8px;color:#fff;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center"><div style="font-weight:600;margin-bottom:8px;text-align:center">${name}</div><a href="${u}" target="_blank"><img src="${u}" style="max-width:100%;max-height:240px;border-radius:6px"/></a><button type=\"button\" onclick=\"(function(){var el=document.getElementById('${inputId}'); el.value=''; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); })()\" style=\"position:absolute;top:8px;right:8px;background:rgba(255,255,255,0.08);color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer\">Clear</button></div>`;
+        const downloadLink = (singleOrigin
+            ? (/^https?:\/\//i.test(singleOrigin) || singleOrigin.startsWith('/') ? singleOrigin : (downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(singleOrigin))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(singleOrigin)))))
+            : (downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(value))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(value)))));
+
+        const box = document.createElement('div');
+        box.style.maxWidth = '100%';
+        box.style.background = '#222';
+        box.style.padding = '8px';
+        box.style.borderRadius = '8px';
+        box.style.color = '#fff';
+        box.style.position = 'relative';
+        box.style.display = 'flex';
+        box.style.flexDirection = 'column';
+        box.style.alignItems = 'center';
+        box.style.justifyContent = 'center';
+
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.style.marginBottom = '8px';
+        title.style.textAlign = 'center';
+        title.textContent = name;
+        box.appendChild(title);
+
+        const a2 = document.createElement('a');
+        a2.href = u; a2.target = '_blank';
+        const img2 = document.createElement('img');
+        img2.src = u; img2.style.maxWidth = '100%'; img2.style.maxHeight = '240px'; img2.style.borderRadius = '6px';
+        a2.appendChild(img2);
+        box.appendChild(a2);
+
+        if (enableDownload) {
+            const dl2 = document.createElement('a');
+            dl2.href = downloadLink; dl2.target = '_blank';
+            dl2.style.marginTop = '8px'; dl2.style.background = '#fff'; dl2.style.color = '#000'; dl2.style.padding = '6px 10px'; dl2.style.borderRadius = '6px'; dl2.style.textDecoration = 'none';
+            dl2.textContent = 'Download original';
+            box.appendChild(dl2);
+        }
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.textContent = 'Clear';
+        clearBtn.className = 'fm-clear';
+        clearBtn.style.position = 'absolute';
+        clearBtn.style.top = '8px';
+        clearBtn.style.right = '8px';
+        clearBtn.style.background = 'rgba(255,255,255,0.08)';
+        clearBtn.style.color = '#fff';
+        clearBtn.style.border = '0';
+        clearBtn.style.borderRadius = '6px';
+        clearBtn.style.padding = '6px 8px';
+        clearBtn.style.cursor = 'pointer';
+        box.appendChild(clearBtn);
+
+        el.appendChild(box);
     }
 
     return {
@@ -83,6 +346,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
             const urlWithCb = url + (url.indexOf('?') === -1 ? '?': '&') + 'cb=' + encodeURIComponent(instanceKey);
             window.open(urlWithCb, 'FileManager', 'width=900,height=600');
         },
+
         clear() {
             const el = document.getElementById(inputId);
             if (!el) return;
@@ -91,14 +355,42 @@ window.fileManagerPickerUploadComponent = function (opts) {
             el.dispatchEvent(new Event('change', { bubbles: true }));
             renderPreview(el.value);
         },
+
         init() {
             const el = document.getElementById(inputId);
             if (!el) return;
             renderPreview(el.value);
+
             // hookup livewire updates if necessary
             const observer = new MutationObserver(() => renderPreview(el.value));
-            try { observer.observe(el, { attributes: true, childList: true, subtree: true }) } catch (e) {}
-        }
+            try { observer.observe(el, { attributes: true, childList: true, subtree: true }); } catch (e) {}
+
+            // attach event delegation handlers to preview container so buttons
+            // can be simple elements (TALL-friendly) and closures can handle logic
+            try {
+                const previewEl = document.getElementById(previewSelector);
+                if (previewEl && !previewEl._fm_delegated) {
+                    previewEl.addEventListener('click', function (ev) {
+                        const btn = ev.target.closest && ev.target.closest('.fm-delete');
+                        if (btn) {
+                            ev.preventDefault();
+                            const idx = parseInt(btn.getAttribute('data-idx'), 10);
+                            if (!Number.isNaN(idx)) {
+                                try { api.removeIndex(idx); } catch (e) { console.error(e); }
+                            }
+                            return;
+                        }
+                        const clearBtn = ev.target.closest && ev.target.closest('.fm-clear');
+                        if (clearBtn) {
+                            ev.preventDefault();
+                            try { api.clearAll(); } catch (e) { console.error(e); }
+                            return;
+                        }
+                    });
+                    previewEl._fm_delegated = true;
+                }
+            } catch (e) { /* ignore delegation errors */ }
+        },
     };
 };
 </script>

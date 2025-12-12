@@ -22,16 +22,17 @@ class FileManagerController
                 Route::post('/file-manager/folder', [self::class, 'folder'])->name('folder');
                 Route::delete('/file-manager/file', [self::class, 'delete'])->name('delete');
                 Route::get('/file-manager/serve/{path}', [self::class, 'serveFile'])->where('path', '.*')->name('file-manager.serve');
+                Route::get('/file-manager/download/{path}', [self::class, 'downloadFile'])->where('path', '.*')->name('file-manager.download');
                 Route::get('/file-preview/{encodedPath}', function ($encodedPath) {
                     try {
                         $path = urldecode(base64_decode(strtr($encodedPath, '-_', '+/')));
                         $disk = config('filament-filemanager.disk', 'local');
 
                         if (!Storage::disk($disk)->exists($path)) {
-                            \Log::error('[FFM] File not found:', [
-                                'disk' => $disk,
-                                'path' => $path
-                            ]);
+                            // \Log::error('[FFM] File not found:', [
+                            //     'disk' => $disk,
+                            //     'path' => $path
+                            // ]);
                             abort(404, 'File not found on disk: ' . $disk . ' path: ' . $path);
                         }
                         
@@ -39,7 +40,7 @@ class FileManagerController
                         if ($disk === 'local') {
                             $filePath = Storage::disk($disk)->path($path);
                             if (!file_exists($filePath)) {
-                                \Log::error('[FFM] File path not found:', $filePath);
+                                // \Log::error('[FFM] File path not found:', $filePath);
                                 abort(404, 'File not found: ' . $filePath);
                             }
                             
@@ -68,16 +69,30 @@ class FileManagerController
                             abort(404, 'File not accessible');
                         }
                     } catch (\Exception $e) {
-                        \Log::error('[FFM] File preview error:', [
-                            'encodedPath' => $encodedPath,
-                            'error' => $e->getMessage(),
-                            'trace' => $e->getTraceAsString()
-                        ]);
+                        // \Log::error('[FFM] File preview error:', [
+                        //     'encodedPath' => $encodedPath,
+                        //     'error' => $e->getMessage(),
+                        //     'trace' => $e->getTraceAsString()
+                        // ]);
                         abort(500, 'File preview error: ' . $e->getMessage());
                     }
                 })->where('encodedPath', '.*')->name('filament-filemanager.file-preview');
 
             });
+    }
+
+    public function downloadFile(Request $request, $path)
+    {
+        $disk = config('filament-filemanager.disk', 'local');
+        $root = Storage::disk($disk)->path('');
+        $filePath = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $path);
+        $realFilePath = realpath($filePath) ?: $filePath;
+        $realRoot = realpath($root) ?: $root;
+        if (!str_starts_with($realFilePath, $realRoot) || !is_file($filePath)) {
+            abort(404, 'File not found');
+        }
+        $name = basename($filePath);
+        return response()->download($filePath, $name);
     }
 
     public function index(Request $request)
