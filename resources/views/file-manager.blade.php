@@ -356,8 +356,22 @@
     const currentPath = @js($path ?? '');
     const currentDisk = @js($disk ?? 'local');
     const isMultipleMode = (new URL(window.location.href)).searchParams.get('multiple') === '1';
-    // Remember last visited path on load for next openings
-    try { localStorage.setItem('ffm:lastPath', (currentPath || '')); } catch (e) {}
+    // Remember last visited path on load for next openings. If this opener has no path, try restoring saved path.
+    try {
+        const urlObj = new URL(window.location.href);
+        const restoredFlag = urlObj.searchParams.get('restored');
+        const saved = localStorage.getItem('ffm:lastPath');
+        if ((!currentPath || String(currentPath) === '') && saved) {
+            // avoid redirect loops by using a temporary flag
+            if (restoredFlag !== '1') {
+                urlObj.searchParams.set('path', saved);
+                urlObj.searchParams.set('restored', '1');
+                window.location.href = urlObj.toString();
+            }
+        } else if (currentPath) {
+            try { localStorage.setItem('ffm:lastPath', (currentPath || '')); } catch (e) {}
+        }
+    } catch (e) {}
 
     function goTo(path) {
         const url = new URL(window.location.href);

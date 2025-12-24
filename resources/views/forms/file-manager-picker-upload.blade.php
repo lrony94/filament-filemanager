@@ -232,6 +232,87 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 wrapper.appendChild(itemDiv);
             });
 
+            // enable drag-and-drop reorder
+            function moveArray(a, from, to) {
+                const copy = a.slice();
+                const it = copy.splice(from, 1)[0];
+                copy.splice(to, 0, it);
+                return copy;
+            }
+
+            Array.from(wrapper.children).forEach(function(ch, i){
+                ch.setAttribute('draggable', 'true');
+                ch.setAttribute('data-idx', i);
+                ch.addEventListener('dragstart', function(ev){
+                    try { ev.dataTransfer.setData('text/plain', String(i)); } catch(e){}
+                    ch.style.opacity = '0.5';
+                    // nice drag image
+                    try {
+                        const img = ch.querySelector('img');
+                        if (img) {
+                            const d = img.cloneNode(true);
+                            d.style.width = '160px'; d.style.height = '120px'; d.style.objectFit = 'cover'; d.style.borderRadius = '8px';
+                            d.style.position = 'absolute'; d.style.left = '-9999px';
+                            document.body.appendChild(d);
+                            try { ev.dataTransfer.setDragImage(d, 80, 60); } catch (e) {}
+                            setTimeout(()=>{ try{ document.body.removeChild(d); }catch(e){} }, 0);
+                        }
+                    } catch (e) {}
+                });
+                ch.addEventListener('dragend', function(){ ch.style.opacity = ''; removeHighlights(); });
+            });
+
+            function removeHighlights(){ Array.from(wrapper.querySelectorAll('[data-idx]')).forEach(function(c){ c.style.outline=''; c.style.boxShadow=''; }); }
+
+            wrapper.addEventListener('dragover', function(ev){
+                ev.preventDefault();
+                try {
+                    const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
+                    removeHighlights();
+                    if (targetEl) {
+                        targetEl.style.outline = '3px dashed rgba(37,99,235,0.9)';
+                        targetEl.style.boxShadow = '0 6px 18px rgba(37,99,235,0.12)';
+                    }
+                } catch (e) {}
+            });
+            wrapper.addEventListener('drop', function(ev){
+                ev.preventDefault();
+                try {
+                    const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
+                    if (Number.isNaN(from)) return;
+                    const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
+                    let to = null;
+                    if (targetEl) to = parseInt(targetEl.getAttribute('data-idx'), 10);
+                    else to = wrapper.children.length - 1;
+                    if (Number.isNaN(to) || from === to) return;
+
+                    // reorder input array
+                    const inp = document.getElementById(inputId);
+                    if (!inp) return;
+                    let arrCur = [];
+                    try { arrCur = JSON.parse(inp.value || '[]') || []; } catch(e){ arrCur = []; }
+                    const newArr = moveArray(arrCur, from, to);
+                    inp.value = JSON.stringify(newArr);
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+
+                    // reorder previewData when applicable
+                    try {
+                        if (previewData) {
+                            if (Array.isArray(previewData)) {
+                                previewData = moveArray(previewData, from, to);
+                            } else if (Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
+                                previewData.thumb = moveArray(previewData.thumb, from, to);
+                                previewData.origin = moveArray(previewData.origin, from, to);
+                            }
+                        }
+                    } catch (e) { console.error(e); }
+
+                    // re-render
+                    renderPreview(inp.value);
+                } catch (e) { console.error(e); }
+            });
+
             el.appendChild(wrapper);
             return;
         }
@@ -342,7 +423,14 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     try { delete window.__fileManagerSelectCallbacks[instanceKey]; } catch (e) {}
                 }
             };
-            const url = openUrl + (openUrl.indexOf('?') === -1 ? '?' : '&') + (isMultiple ? 'multiple=1' : '');
+            let url = openUrl + (openUrl.indexOf('?') === -1 ? '?' : '&') + (isMultiple ? 'multiple=1' : '');
+            // try to pass last visited path to file manager (non-destructive)
+            try {
+                const last = localStorage.getItem('ffm:lastPath');
+                if (last) {
+                    url += '&path=' + encodeURIComponent(last);
+                }
+            } catch (e) {}
             const urlWithCb = url + (url.indexOf('?') === -1 ? '?': '&') + 'cb=' + encodeURIComponent(instanceKey);
             window.open(urlWithCb, 'FileManager', 'width=900,height=600');
         },
