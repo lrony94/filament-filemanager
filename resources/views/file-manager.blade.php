@@ -261,6 +261,7 @@
             </div>
         </div>
         <input id="picker" type="file"/>
+        <!-- <input id="altInput" type="text" placeholder="Alt text (optional)" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;width:260px;" /> -->
     </div>
 </header>
 <div id="selectionBar" class="selection-bar">
@@ -663,7 +664,10 @@
 
     function useSelected() {
         if (!selected.size) return;
-        const payloads = Array.from(selected).map(p => ({ path: p, url: (initialFiles.find(f=>normalizePath(f.path)===normalizePath(p))||{}).url || '' }));
+        const payloads = Array.from(selected).map(p => {
+            const f = (initialFiles.find(f=>normalizePath(f.path)===normalizePath(p))||{});
+            return { path: p, url: f.url || '', alt: (f.alt || '') };
+        });
         // Persist current folder as last path for future openings
         try { localStorage.setItem('ffm:lastPath', normalizePath(currentPath || '')); } catch (e) {}
         if (window.opener) {
@@ -829,6 +833,7 @@
     }
 
     const picker = document.getElementById('picker');
+    const altInput = document.getElementById('altInput');
     if (picker) {
         picker.addEventListener('change', async (e) => {
             const file = e.target.files?.[0];
@@ -848,6 +853,8 @@
                 });
                 if (!res.ok) throw new Error('Upload failed');
                 const data = await res.json();
+                // capture alt text from input box (optional)
+                const altText = (altInput?.value || '').trim();
                 // add to list immediately
                 initialFiles.unshift({
                     name: data.name,
@@ -856,11 +863,12 @@
                     path: normalizePath(data.path),
                     size: data.size,
                     mtime: data.mtime,
+                    alt: altText,
                 });
                 render();
                 // 在单选模式下立即返回；多选模式仅加入列表与勾选
                 if (!isMultipleMode) {
-                    selectFile({url: data.url, path: data.path});
+                    selectFile({url: data.url, path: data.path, alt: altText});
                 } else {
                     selected.add(normalizePath(data.path));
                     updateSelectionUI();
@@ -870,6 +878,7 @@
                 console.error(err);
             } finally {
                 e.target.value = '';
+                if (altInput) altInput.value = '';
             }
         });
     }

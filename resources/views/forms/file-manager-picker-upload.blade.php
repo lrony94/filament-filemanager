@@ -38,12 +38,34 @@ window.fileManagerPickerUploadComponent = function (opts) {
         if (!v) return isMultiple ? [] : '';
         if (isMultiple) {
             try {
-                return JSON.parse(v);
+                const arr = JSON.parse(v);
+                if (Array.isArray(arr)) {
+                    return arr.map(item => {
+                        if (typeof item === 'string') return { path: item, alt: '' };
+                        if (item && typeof item === 'object') return { path: (item.path || item.url || ''), alt: (item.alt || '') };
+                        return { path: String(item || ''), alt: '' };
+                    });
+                }
+                return [];
             } catch (e) {
                 return [];
             }
         }
         return v;
+    }
+
+    function normalizePath(p) {
+        if (!p) return '';
+        try {
+            let s = String(p);
+            // remove protocol and host
+            s = s.replace(/^https?:\/\/[^\/]+/i, '');
+            // unify leading slashes
+            s = s.replace(/^\/+/, '/');
+            // drop common storage/public prefixes for matching DB-origin path
+            s = s.replace(/^\/(storage|public)\//i, '');
+            return s;
+        } catch (e) { return String(p || ''); }
     }
 
     // API methods (closure-scoped) — will be invoked via event delegation
@@ -75,6 +97,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         if (Array.isArray(previewData.origin)) {
                             try { previewData.origin.splice(idx, 1); } catch (e) {}
                         }
+                        if (Array.isArray(previewData.alt)) {
+                            try { previewData.alt.splice(idx, 1); } catch (e) {}
+                        }
                     }
                 } catch (e) {}
 
@@ -100,6 +125,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         }
                         if (Array.isArray(previewData.origin)) {
                             try { previewData.origin.splice(0, previewData.origin.length); } catch (e) {}
+                        }
+                        if (Array.isArray(previewData.alt)) {
+                            try { previewData.alt.splice(0, previewData.alt.length); } catch (e) {}
                         }
                     }
                 } catch (e) {}
@@ -127,8 +155,17 @@ window.fileManagerPickerUploadComponent = function (opts) {
             wrapper.style.flexWrap = 'wrap';
             wrapper.style.gap = '10px';
 
+            // 在首次渲染时尝试把 previewData 中已有的 alt 同步回隐藏输入，避免未聚焦输入框时 alt 丢失；后续不再强制写回，避免覆盖用户清空操作
+            let hiddenEl = document.getElementById(inputId);
+            let hiddenArr = [];
+            let hiddenChanged = false;
+            const allowBackfillAlt = !el._fm_altHydrated; // 仅首轮允许回填
+            try { hiddenArr = JSON.parse(hiddenEl?.value || '[]') || []; } catch (e) { hiddenArr = []; }
+
             arr.forEach((v, idx) => {
-                const name = String(v).split('/').pop();
+                const pth = (v && typeof v === 'object') ? (v.path || '') : String(v || '');
+                let altVal = (v && typeof v === 'object') ? (v.alt || '') : '';
+                const name = String(pth).split('/').pop();
 
                 // Find corresponding thumb/origin in previewData
                 let thumbs = null;
@@ -136,26 +173,91 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 try {
                     if (previewData) {
                         if (Array.isArray(previewData)) {
-                            const item = previewData[idx] || previewData.find(p => p && (p.value === v || p.value === String(v)));
+                            const item = previewData[idx] || previewData.find(p => p && ((p.value === pth) || (p.value === String(pth))));
                             if (item) { thumbs = item.thumb || null; origins = item.origin || null; }
                         } else if (previewData.thumb && previewData.origin && Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
-                            thumbs = previewData.thumb[idx] || null;
-                            origins = previewData.origin[idx] || null;
-                        } else if (previewData[v]) {
-                            thumbs = previewData[v].thumb || null;
-                            origins = previewData[v].origin || null;
+                            // Structured arrays: find index by matching origin (prefer exact, then normalized, then basename)
+                            let idx2 = -1;
+                            try {
+                                const originsArr = Array.isArray(previewData.origin) ? previewData.origin : [];
+                                const nPth = normalizePath(pth);
+                                // exact match
+                                idx2 = originsArr.findIndex(o => String(o) === pth);
+                                if (idx2 < 0) {
+                                    // normalized path match
+                                    idx2 = originsArr.findIndex(o => normalizePath(o) === nPth);
+                                }
+                                if (idx2 < 0) {
+                                    // basename match
+                                    const base = nPth.split('/').pop();
+                                    idx2 = originsArr.findIndex(o => String(o).split('/').pop() === base);
+                                }
+                                if (idx2 < 0) {
+                                    // fallback: try match by thumb
+                                    const thumbsArr = Array.isArray(previewData.thumb) ? previewData.thumb : [];
+                                    idx2 = thumbsArr.findIndex(t => String(t) === pth || normalizePath(t) === nPth || String(t).split('/').pop() === nPth.split('/').pop());
+                                }
+                                if (idx2 < 0 && Array.isArray(previewData.origin) && idx < previewData.origin.length) {
+                                    idx2 = idx; // final fallback: positionally align
+                                }
+                            } catch (e) { idx2 = -1; }
+
+                            const tArr = Array.isArray(previewData.thumb) ? previewData.thumb : [];
+                            const oArr = Array.isArray(previewData.origin) ? previewData.origin : [];
+                            thumbs = (idx2 >= 0 && idx2 < tArr.length) ? tArr[idx2] : (tArr[idx] || null);
+                            origins = (idx2 >= 0 && idx2 < oArr.length) ? oArr[idx2] : (oArr[idx] || null);
+                            const aArr = Array.isArray(previewData.alt) ? previewData.alt : [];
+                            if (!altVal && aArr.length) {
+                                altVal = (idx2 >= 0 && idx2 < aArr.length) ? (aArr[idx2] || '') : (aArr[idx] || '');
+                            }
+                        } else {
+                            // Map keyed by path (origin or thumb). Try direct, then normalized matching by key or basename.
+                            let entry = previewData[pth];
+                            if (!entry) {
+                                const nPth = normalizePath(pth);
+                                // exact normalized match on keys
+                                const keys = Object.keys(previewData || {});
+                                entry = keys.map(k => [k, previewData[k]]).find(([k]) => normalizePath(k) === nPth)?.[1];
+                                if (!entry) {
+                                    // fallback: basename matching
+                                    const base = nPth.split('/').pop();
+                                    entry = keys.map(k => [k, previewData[k]]).find(([k]) => (normalizePath(k).split('/').pop() === base))?.[1];
+                                }
+                            }
+                            if (entry) {
+                                thumbs = entry.thumb || null;
+                                origins = entry.origin || null;
+                                if (Array.isArray(entry.alt)) { altVal = altVal || (entry.alt[0] || ''); }
+                                else if (typeof entry.alt === 'string') { altVal = altVal || (entry.alt || ''); }
+                            }
                         }
                     }
                 } catch (e) {
                     console.error(e);
                 }
 
+                // 若隐藏值对应位置没有 alt 或为旧字符串结构，则把从 previewData 获得的 alt 写回
+                try {
+                    if (hiddenEl) {
+                        if (typeof hiddenArr[idx] === 'string') {
+                            // 始终将字符串项升级为对象并附加预览提供的 alt（如有），避免在后续提交时丢失 alt
+                            const upgraded = { path: hiddenArr[idx], alt: (altVal || '') };
+                            hiddenArr[idx] = upgraded; hiddenChanged = true;
+                        } else if (hiddenArr[idx] && typeof hiddenArr[idx] === 'object') {
+                            const curPath = hiddenArr[idx].path || hiddenArr[idx].url || '';
+                            // 仅当对象中没有 alt 键（从字符串转对象但未设置过 alt）时才回填，避免覆盖用户清空为 '' 的值
+                            const hasAltKey = Object.prototype.hasOwnProperty.call(hiddenArr[idx], 'alt');
+                            if (!hasAltKey && altVal && (curPath === pth)) { hiddenArr[idx].alt = altVal; hiddenChanged = true; }
+                        }
+                    }
+                } catch (e) {}
+
                 let previewUrl = null;
                 if (thumbs) previewUrl = Array.isArray(thumbs) ? thumbs[0] : thumbs;
                 if (!previewUrl) {
-                    const encoded = btoa(unescape(encodeURIComponent(String(v)))).replace(/=/g, '');
-                    previewUrl = /^https?:\/\//i.test(v) || v.startsWith('/')
-                        ? v
+                    const encoded = btoa(unescape(encodeURIComponent(String(pth)))).replace(/=/g, '');
+                    previewUrl = /^https?:\/\//i.test(pth) || pth.startsWith('/')
+                        ? pth
                         : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + encoded) : ('/filament-filemanager/file-preview/' + encoded));
                 }
 
@@ -166,12 +268,17 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(downloadUrl))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(downloadUrl)));
                     }
                 } else {
-                    downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(v))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(v)));
+                    downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(pth))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(pth)));
                 }
 
                 const itemDiv = document.createElement('div');
-                itemDiv.style.width = '120px';
+                itemDiv.style.width = '132px';
                 itemDiv.style.position = 'relative';
+                itemDiv.style.border = '1px solid #e5e7eb';
+                itemDiv.style.borderRadius = '10px';
+                itemDiv.style.padding = '6px';
+                itemDiv.style.background = '#fff';
+                itemDiv.style.boxShadow = '0 1px 2px rgba(0,0,0,0.04)';
 
                 const a = document.createElement('a');
                 a.href = previewUrl;
@@ -221,6 +328,45 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 delBtn.style.cursor = 'pointer';
                 itemDiv.appendChild(delBtn);
 
+                // Alt input
+                const altInput = document.createElement('input');
+                altInput.type = 'text';
+                altInput.placeholder = 'Alt text';
+                altInput.value = altVal;
+                altInput.style.marginTop = '6px';
+                altInput.style.width = '100%';
+                altInput.style.boxSizing = 'border-box';
+                altInput.style.fontSize = '13px';
+                altInput.style.padding = '6px 8px';
+                altInput.style.border = '1px solid #e5e7eb';
+                altInput.style.borderRadius = '8px';
+                altInput.style.background = '#fff';
+                // Avoid updating hidden input on each keystroke to prevent Livewire rerenders.
+                // Only persist alt into the hidden value on blur.
+                altInput.addEventListener('input', function() {
+                    // no-op: keep typing smooth; optionally stash in DOM dataset
+                    try { itemDiv.dataset.pendingAlt = altInput.value; } catch(e) {}
+                });
+                altInput.addEventListener('blur', function() {
+                    try {
+                        const el = document.getElementById(inputId);
+                        if (!el) return;
+                        let cur = [];
+                        try { cur = JSON.parse(el.value || '[]') || []; } catch(e){ cur = []; }
+                        if (!Array.isArray(cur)) cur = [];
+                        // ensure object shape and apply pending alt at current index
+                        const pending = itemDiv.dataset && itemDiv.dataset.pendingAlt !== undefined ? itemDiv.dataset.pendingAlt : altInput.value;
+                        cur = cur.map((it, i) => {
+                            if (typeof it === 'string') return { path: it, alt: (i===idx ? pending : '') };
+                            return { path: (it.path || it.url || ''), alt: (i===idx ? pending : (it.alt || '')) };
+                        });
+                        el.value = JSON.stringify(cur);
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    } catch(e) {}
+                });
+                itemDiv.appendChild(altInput);
+
                 const nameDiv = document.createElement('div');
                 nameDiv.style.fontSize = '12px';
                 nameDiv.style.overflow = 'hidden';
@@ -231,6 +377,16 @@ window.fileManagerPickerUploadComponent = function (opts) {
 
                 wrapper.appendChild(itemDiv);
             });
+
+            // 渲染结束后，如有从 previewData 同步的 alt，落盘至隐藏域。
+            // 为避免页面刷新时触发 afterStateUpdated，这里仅更新隐藏值，不派发 input/change。
+            try {
+                if (hiddenChanged && hiddenEl) {
+                    hiddenEl.value = JSON.stringify(hiddenArr);
+                }
+                // 标记已完成首轮回填，后续渲染不再覆盖用户编辑的 alt（字符串项升级为对象仍允许继续保持）
+                el._fm_altHydrated = true;
+            } catch (e) {}
 
             // enable drag-and-drop reorder
             function moveArray(a, from, to) {
@@ -304,6 +460,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
                             } else if (Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
                                 previewData.thumb = moveArray(previewData.thumb, from, to);
                                 previewData.origin = moveArray(previewData.origin, from, to);
+                                if (Array.isArray(previewData.alt)) {
+                                    previewData.alt = moveArray(previewData.alt, from, to);
+                                }
                             }
                         }
                     } catch (e) { console.error(e); }
@@ -322,17 +481,30 @@ window.fileManagerPickerUploadComponent = function (opts) {
 
         let singleThumb = null;
         let singleOrigin = null;
+        let singleAlt = '';
         if (previewData) {
             try {
                 if (previewData.thumb && previewData.origin) {
                     singleThumb = Array.isArray(previewData.thumb) ? previewData.thumb[0] : previewData.thumb;
                     singleOrigin = Array.isArray(previewData.origin) ? previewData.origin[0] : previewData.origin;
+                    if (previewData.alt) {
+                        singleAlt = Array.isArray(previewData.alt) ? (previewData.alt[0] || '') : (previewData.alt || '');
+                    }
                 } else if (previewData.value === value) {
                     singleThumb = previewData.thumb || null;
                     singleOrigin = previewData.origin || null;
+                    if (typeof previewData.alt === 'string') singleAlt = previewData.alt || '';
                 }
             } catch (e) { console.error(e); }
         }
+
+        // pull existing single alt from sidecar hidden input if present
+        try {
+            const altHidden = document.getElementById(inputId + '_alt');
+            if (altHidden && typeof altHidden.value === 'string' && altHidden.value) {
+                singleAlt = altHidden.value;
+            }
+        } catch (e) {}
 
         const encoded = btoa(unescape(encodeURIComponent(String(value)))).replace(/=/g, '');
         const u = singleThumb
@@ -345,15 +517,17 @@ window.fileManagerPickerUploadComponent = function (opts) {
 
         const box = document.createElement('div');
         box.style.maxWidth = '100%';
-        box.style.background = '#222';
-        box.style.padding = '8px';
-        box.style.borderRadius = '8px';
-        box.style.color = '#fff';
+        box.style.background = '#fff';
+        box.style.padding = '10px';
+        box.style.borderRadius = '10px';
+        box.style.border = '1px solid #e5e7eb';
+        box.style.color = '#111827';
         box.style.position = 'relative';
         box.style.display = 'flex';
         box.style.flexDirection = 'column';
         box.style.alignItems = 'center';
         box.style.justifyContent = 'center';
+        box.style.boxShadow = '0 1px 2px rgba(0,0,0,0.04)';
 
         const title = document.createElement('div');
         title.style.fontWeight = '600';
@@ -365,14 +539,15 @@ window.fileManagerPickerUploadComponent = function (opts) {
         const a2 = document.createElement('a');
         a2.href = u; a2.target = '_blank';
         const img2 = document.createElement('img');
-        img2.src = u; img2.style.maxWidth = '100%'; img2.style.maxHeight = '240px'; img2.style.borderRadius = '6px';
+        img2.src = u; img2.style.maxWidth = '100%'; img2.style.maxHeight = '280px'; img2.style.borderRadius = '8px';
+        img2.style.objectFit = 'contain';
         a2.appendChild(img2);
         box.appendChild(a2);
 
         if (enableDownload) {
             const dl2 = document.createElement('a');
             dl2.href = downloadLink; dl2.target = '_blank';
-            dl2.style.marginTop = '8px'; dl2.style.background = '#fff'; dl2.style.color = '#000'; dl2.style.padding = '6px 10px'; dl2.style.borderRadius = '6px'; dl2.style.textDecoration = 'none';
+            dl2.style.marginTop = '8px'; dl2.style.background = '#f3f4f6'; dl2.style.color = '#111827'; dl2.style.padding = '6px 10px'; dl2.style.borderRadius = '6px'; dl2.style.textDecoration = 'none';
             dl2.textContent = 'Download original';
             box.appendChild(dl2);
         }
@@ -384,13 +559,55 @@ window.fileManagerPickerUploadComponent = function (opts) {
         clearBtn.style.position = 'absolute';
         clearBtn.style.top = '8px';
         clearBtn.style.right = '8px';
-        clearBtn.style.background = 'rgba(255,255,255,0.08)';
+        clearBtn.style.background = 'rgba(0,0,0,0.6)';
         clearBtn.style.color = '#fff';
         clearBtn.style.border = '0';
         clearBtn.style.borderRadius = '6px';
         clearBtn.style.padding = '6px 8px';
         clearBtn.style.cursor = 'pointer';
         box.appendChild(clearBtn);
+
+        // single alt input
+        const altWrap = document.createElement('div');
+        altWrap.style.marginTop = '10px';
+        altWrap.style.width = '100%';
+        const altInput = document.createElement('input');
+        altInput.type = 'text';
+        altInput.placeholder = 'Alt text';
+        altInput.value = singleAlt || '';
+        altInput.style.width = '100%';
+        altInput.style.boxSizing = 'border-box';
+        altInput.style.fontSize = '14px';
+        altInput.style.padding = '8px 10px';
+        altInput.style.border = '1px solid #e5e7eb';
+        altInput.style.borderRadius = '8px';
+        altInput.style.background = '#fff';
+        altInput.addEventListener('input', function(){
+            try {
+                const altHidden = document.getElementById(inputId + '_alt');
+                if (altHidden) { altHidden.value = altInput.value; }
+            } catch (e) {}
+        });
+        altInput.addEventListener('blur', function(){
+            try {
+                const altHidden = document.getElementById(inputId + '_alt');
+                if (altHidden) {
+                    altHidden.value = altInput.value;
+                    altHidden.dispatchEvent(new Event('input', { bubbles: true }));
+                    altHidden.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            } catch (e) {}
+        });
+        altWrap.appendChild(altInput);
+        box.appendChild(altWrap);
+
+        // keep alt hidden cleared when clearing selection
+        clearBtn.addEventListener('click', function(){
+            try {
+                const altHidden = document.getElementById(inputId + '_alt');
+                if (altHidden) altHidden.value = '';
+            } catch (e) {}
+        });
 
         el.appendChild(box);
     }
@@ -407,12 +624,20 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         const payloads = Array.isArray(payload) ? payload : [payload];
                         payloads.forEach(p => {
                             const v = (p.path || p.url || p);
-                            if (v && !arr.includes(v)) arr.push(v);
+                            const alt = (p.alt || '');
+                            const item = (typeof v === 'string') ? { path: v, alt: alt } : { path: String(v || ''), alt: alt };
+                            // avoid duplicates by path
+                            const exists = Array.isArray(arr) && arr.some(it => (typeof it === 'string' ? it === v : (it && (it.path === v))));
+                            if (v && !exists) arr.push(item);
                         });
                         document.getElementById(inputId).value = JSON.stringify(arr);
                     } else {
                         const v = (payload.path || payload.url || payload);
                         document.getElementById(inputId).value = v || '';
+                        try {
+                            const altHidden = document.getElementById(inputId + '_alt');
+                            if (altHidden) altHidden.value = (payload.alt || '');
+                        } catch (e) {}
                     }
                     document.getElementById(inputId).dispatchEvent(new Event('input', { bubbles: true }));
                     document.getElementById(inputId).dispatchEvent(new Event('change', { bubbles: true }));
@@ -441,6 +666,13 @@ window.fileManagerPickerUploadComponent = function (opts) {
             el.value = isMultiple ? '[]' : '';
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
+            // clear sidecar alt for single mode
+            if (!isMultiple) {
+                try {
+                    const altHidden = document.getElementById(inputId + '_alt');
+                    if (altHidden) altHidden.value = '';
+                } catch (e) {}
+            }
             renderPreview(el.value);
         },
 
@@ -478,6 +710,40 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     previewEl._fm_delegated = true;
                 }
             } catch (e) { /* ignore delegation errors */ }
+
+            // 在表单提交前，确保所有可见的 alt 输入值都被同步回隐藏域
+            try {
+                const formEl = el.closest && el.closest('form');
+                if (formEl && !formEl._fm_altSync) {
+                    formEl.addEventListener('submit', function(){
+                        try {
+                            const previewBox = document.getElementById(previewSelector);
+                            if (!previewBox) return;
+                            if (isMultiple) {
+                                const items = Array.from(previewBox.querySelectorAll('div[draggable="true"]'));
+                                let cur = [];
+                                try { cur = JSON.parse(el.value || '[]') || []; } catch (e) { cur = []; }
+                                if (!Array.isArray(cur)) cur = [];
+                                const rebuilt = items.map((node, i) => {
+                                    const altInput = node.querySelector('input[type="text"]');
+                                    const pending = (node.dataset && node.dataset.pendingAlt !== undefined) ? node.dataset.pendingAlt : (altInput ? altInput.value : '');
+                                    const it = cur[i];
+                                    if (typeof it === 'string') return { path: it, alt: pending || '' };
+                                    return { path: (it?.path || it?.url || ''), alt: (pending || it?.alt || '') };
+                                });
+                                el.value = JSON.stringify(rebuilt);
+                            } else {
+                                const altHidden = document.getElementById(inputId + '_alt');
+                                const singleAltInput = previewBox.querySelector('input[type="text"]');
+                                if (altHidden && singleAltInput) {
+                                    altHidden.value = singleAltInput.value || '';
+                                }
+                            }
+                        } catch (e) {}
+                    });
+                    formEl._fm_altSync = true;
+                }
+            } catch (e) {}
         },
     };
 };
@@ -504,6 +770,15 @@ window.fileManagerPickerUploadComponent = function (opts) {
             {{ $applyStateBindingModifiers('wire:model') }}="{{ $getStatePath() }}"
             value="{{ is_array($getState()) ? json_encode($getState(), JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) : ($getState() ?? '') }}"
         />
+        @if (! $multiple)
+            <input
+                type="hidden"
+                id="{{ $getId() }}_alt"
+                name="{{ method_exists($field, 'getAltName') ? $field->getAltName() : ($getName() . '_alt') }}"
+                {{ $applyStateBindingModifiers('wire:model') }}="{{ method_exists($field, 'getAltStatePath') ? $field->getAltStatePath() : ($getStatePath() . '_alt') }}"
+                value=""
+            />
+        @endif
     </div>
 </x-dynamic-component>
 
