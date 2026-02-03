@@ -245,9 +245,34 @@
         .row-selected td {
             color: #111827;
         }
+
+        /* Loading overlay */
+        .loading-overlay {
+            position: fixed;
+            left: 0; right: 0; top: 0; bottom: 0;
+            background: rgba(255, 255, 255, 0.75);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .loading-box { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .loading-spinner {
+            width: 36px; height: 36px; border-radius: 50%;
+            border: 4px solid #e5e7eb; border-top-color: #2563eb;
+            animation: spin 0.9s linear infinite;
+        }
+        .loading-text { color: #111827; font-weight: 600; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
+<div id="loadingOverlay" class="loading-overlay">
+    <div class="loading-box">
+        <div class="loading-spinner"></div>
+        <div id="loadingText" class="loading-text">Loading...</div>
+    </div>
+    </div>
 <header>
     <h1>Files</h1>
     <div class="toolbar">
@@ -305,6 +330,20 @@
 </table>
 
 <script>
+    function showLoading(text) {
+        try {
+            const o = document.getElementById('loadingOverlay');
+            const t = document.getElementById('loadingText');
+            if (t && typeof text === 'string') t.textContent = text;
+            if (o) o.style.display = 'flex';
+        } catch (e) {}
+    }
+    function hideLoading() {
+        try {
+            const o = document.getElementById('loadingOverlay');
+            if (o) o.style.display = 'none';
+        } catch (e) {}
+    }
     function selectFile(payload) {
         // normalize payload to object { url, path }
         const data = (typeof payload === 'string') ? {url: payload} : (payload || {});
@@ -379,6 +418,7 @@
         if (path) url.searchParams.set('path', normalizePath(path)); else url.searchParams.delete('path');
         // Persist target path before navigation
         try { localStorage.setItem('ffm:lastPath', normalizePath(path || '')); } catch (e) {}
+        showLoading('Loading folder...');
         window.location.href = url.toString();
     }
 
@@ -842,6 +882,7 @@
             form.append('file', file);
             form.append('path', normalizePath(currentPath));
             try {
+                showLoading('Uploading...');
                 const res = await fetch(`{{ route('filament-filemanager.upload') }}`, {
                     method: 'POST',
                     headers: {
@@ -851,8 +892,13 @@
                     credentials: 'same-origin',
                     body: form,
                 });
-                if (!res.ok) throw new Error('Upload failed');
-                const data = await res.json();
+                let data = {};
+                try { data = await res.json(); } catch (_) { data = {}; }
+                if (!res.ok || data?.ok === false) {
+                    const msg = (data && data.error) ? data.error : 'Upload failed';
+                    alert(msg);
+                    return;
+                }
                 // capture alt text from input box (optional)
                 const altText = (altInput?.value || '').trim();
                 // add to list immediately
@@ -877,6 +923,7 @@
                 alert('Upload failed');
                 console.error(err);
             } finally {
+                hideLoading();
                 e.target.value = '';
                 if (altInput) altInput.value = '';
             }

@@ -190,7 +190,36 @@ class FileManagerController
             return response()->json(['ok' => false, 'error' => 'Directory is not writable'], 403);
         }
         $ext = strtolower($file->getClientOriginalExtension());
-        $safeName = time() . '_' . Str::random(8) . ($ext ? '.' . $ext : '');
+        // 根据配置决定是否保留源文件名
+        $preserve = (bool) config('filament-filemanager.preserve_original_filename', false);
+        $validationRegex = config('filament-filemanager.filename_validation_regex', '/^[A-Za-z0-9_\-\.]+$/');
+        if ($preserve) {
+            // 获取客户端原始文件名（包含扩展名），并确保不包含路径分隔符
+            $originalName = basename((string) $file->getClientOriginalName());
+            // 统一扩展名为已解析的 $ext
+            $base = pathinfo($originalName, PATHINFO_FILENAME);
+            $candidate = $base . ($ext ? '.' . $ext : '');
+            // 额外的安全检查：拒绝包含..或分隔符
+            if (str_contains($candidate, '..') || str_contains($candidate, '/') || str_contains($candidate, '\\')) {
+                return response()->json(['ok' => false, 'error' => 'Invalid filename: cannot contain path separators or ..'], 422);
+            }
+            // 正则校验合法性（包含扩展名）
+            if (!preg_match($validationRegex, $candidate)) {
+                return response()->json(['ok' => false, 'error' => 'Invalid filename: only letters, numbers, underscores, hyphens, and dots are allowed'], 422);
+            }
+            // 若存在重名，追加序号避免覆盖
+            $safeName = $candidate;
+            if (file_exists($directory . DIRECTORY_SEPARATOR . $safeName)) {
+                $i = 1;
+                $nameBase = $base;
+                do {
+                    $safeName = $nameBase . '_' . $i . ($ext ? '.' . $ext : '');
+                    $i++;
+                } while (file_exists($directory . DIRECTORY_SEPARATOR . $safeName));
+            }
+        } else {
+            $safeName = time() . '_' . Str::random(8) . ($ext ? '.' . $ext : '');
+        }
         try {
             $file->move($directory, $safeName);
         } catch (\Exception $e) {
