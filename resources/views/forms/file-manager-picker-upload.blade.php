@@ -34,6 +34,44 @@ window.fileManagerPickerUploadComponent = function (opts) {
         previewData,
     } = opts;
 
+    // 共享 IntersectionObserver，懒加载图片
+    let __io = null;
+    function getIO() {
+        if (__io !== null) return __io;
+        if ('IntersectionObserver' in window) {
+            __io = new IntersectionObserver((entries, obs) => {
+                entries.forEach((e) => {
+                    if (e.isIntersecting) {
+                        const img = e.target;
+                        try {
+                            if (img && img.dataset && img.dataset.src && !img._loaded) {
+                                img.src = img.dataset.src;
+                                img._loaded = true;
+                                delete img.dataset.src;
+                            }
+                        } catch (err) {}
+                        obs.unobserve(img);
+                    }
+                });
+            }, { root: null, rootMargin: '200px', threshold: 0 });
+        }
+        return __io;
+    }
+
+    function observeOrSetSrc(img, url) {
+        try {
+            img.loading = 'lazy';
+            img.decoding = 'async';
+        } catch (e) {}
+        const io = getIO();
+        if (io) {
+            img.dataset.src = url;
+            io.observe(img);
+        } else {
+            img.src = url;
+        }
+    }
+
     function parseValue(v) {
         if (!v) return isMultiple ? [] : '';
         if (isMultiple) {
@@ -155,7 +193,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
             wrapper.style.flexWrap = 'wrap';
             wrapper.style.gap = '10px';
 
-            // 在首次渲染时尝试把 previewData 中已有的 alt 同步回隐藏输入，避免未聚焦输入框时 alt 丢失；后续不再强制写回，避免覆盖用户清空操作
+            // 在首次渲染时尝试把 previewData 中已有的 alt 同步回隐藏输入
             let hiddenEl = document.getElementById(inputId);
             let hiddenArr = [];
             let hiddenChanged = false;
@@ -176,29 +214,22 @@ window.fileManagerPickerUploadComponent = function (opts) {
                             const item = previewData[idx] || previewData.find(p => p && ((p.value === pth) || (p.value === String(pth))));
                             if (item) { thumbs = item.thumb || null; origins = item.origin || null; }
                         } else if (previewData.thumb && previewData.origin && Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
-                            // Structured arrays: find index by matching origin (prefer exact, then normalized, then basename)
                             let idx2 = -1;
                             try {
                                 const originsArr = Array.isArray(previewData.origin) ? previewData.origin : [];
                                 const nPth = normalizePath(pth);
-                                // exact match
                                 idx2 = originsArr.findIndex(o => String(o) === pth);
+                                if (idx2 < 0) { idx2 = originsArr.findIndex(o => normalizePath(o) === nPth); }
                                 if (idx2 < 0) {
-                                    // normalized path match
-                                    idx2 = originsArr.findIndex(o => normalizePath(o) === nPth);
-                                }
-                                if (idx2 < 0) {
-                                    // basename match
                                     const base = nPth.split('/').pop();
                                     idx2 = originsArr.findIndex(o => String(o).split('/').pop() === base);
                                 }
                                 if (idx2 < 0) {
-                                    // fallback: try match by thumb
                                     const thumbsArr = Array.isArray(previewData.thumb) ? previewData.thumb : [];
                                     idx2 = thumbsArr.findIndex(t => String(t) === pth || normalizePath(t) === nPth || String(t).split('/').pop() === nPth.split('/').pop());
                                 }
                                 if (idx2 < 0 && Array.isArray(previewData.origin) && idx < previewData.origin.length) {
-                                    idx2 = idx; // final fallback: positionally align
+                                    idx2 = idx;
                                 }
                             } catch (e) { idx2 = -1; }
 
@@ -211,15 +242,12 @@ window.fileManagerPickerUploadComponent = function (opts) {
                                 altVal = (idx2 >= 0 && idx2 < aArr.length) ? (aArr[idx2] || '') : (aArr[idx] || '');
                             }
                         } else {
-                            // Map keyed by path (origin or thumb). Try direct, then normalized matching by key or basename.
                             let entry = previewData[pth];
                             if (!entry) {
                                 const nPth = normalizePath(pth);
-                                // exact normalized match on keys
                                 const keys = Object.keys(previewData || {});
                                 entry = keys.map(k => [k, previewData[k]]).find(([k]) => normalizePath(k) === nPth)?.[1];
                                 if (!entry) {
-                                    // fallback: basename matching
                                     const base = nPth.split('/').pop();
                                     entry = keys.map(k => [k, previewData[k]]).find(([k]) => (normalizePath(k).split('/').pop() === base))?.[1];
                                 }
@@ -236,16 +264,13 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     console.error(e);
                 }
 
-                // 若隐藏值对应位置没有 alt 或为旧字符串结构，则把从 previewData 获得的 alt 写回
                 try {
                     if (hiddenEl) {
                         if (typeof hiddenArr[idx] === 'string') {
-                            // 始终将字符串项升级为对象并附加预览提供的 alt（如有），避免在后续提交时丢失 alt
                             const upgraded = { path: hiddenArr[idx], alt: (altVal || '') };
                             hiddenArr[idx] = upgraded; hiddenChanged = true;
                         } else if (hiddenArr[idx] && typeof hiddenArr[idx] === 'object') {
                             const curPath = hiddenArr[idx].path || hiddenArr[idx].url || '';
-                            // 仅当对象中没有 alt 键（从字符串转对象但未设置过 alt）时才回填，避免覆盖用户清空为 '' 的值
                             const hasAltKey = Object.prototype.hasOwnProperty.call(hiddenArr[idx], 'alt');
                             if (!hasAltKey && altVal && (curPath === pth)) { hiddenArr[idx].alt = altVal; hiddenChanged = true; }
                         }
@@ -286,12 +311,12 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 a.style.display = 'block';
 
                 const img = document.createElement('img');
-                img.src = previewUrl;
                 img.style.width = '120px';
                 img.style.height = '90px';
                 img.style.objectFit = 'cover';
                 img.style.borderRadius = '8px';
                 img.style.display = 'block';
+                observeOrSetSrc(img, previewUrl);
                 a.appendChild(img);
                 itemDiv.appendChild(a);
 
@@ -328,7 +353,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 delBtn.style.cursor = 'pointer';
                 itemDiv.appendChild(delBtn);
 
-                // Alt input
                 const altInput = document.createElement('input');
                 altInput.type = 'text';
                 altInput.placeholder = 'Alt text';
@@ -341,10 +365,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 altInput.style.border = '1px solid #e5e7eb';
                 altInput.style.borderRadius = '8px';
                 altInput.style.background = '#fff';
-                // Avoid updating hidden input on each keystroke to prevent Livewire rerenders.
-                // Only persist alt into the hidden value on blur.
                 altInput.addEventListener('input', function() {
-                    // no-op: keep typing smooth; optionally stash in DOM dataset
                     try { itemDiv.dataset.pendingAlt = altInput.value; } catch(e) {}
                 });
                 altInput.addEventListener('blur', function() {
@@ -354,7 +375,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         let cur = [];
                         try { cur = JSON.parse(el.value || '[]') || []; } catch(e){ cur = []; }
                         if (!Array.isArray(cur)) cur = [];
-                        // ensure object shape and apply pending alt at current index
                         const pending = itemDiv.dataset && itemDiv.dataset.pendingAlt !== undefined ? itemDiv.dataset.pendingAlt : altInput.value;
                         cur = cur.map((it, i) => {
                             if (typeof it === 'string') return { path: it, alt: (i===idx ? pending : '') };
@@ -378,17 +398,13 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 wrapper.appendChild(itemDiv);
             });
 
-            // 渲染结束后，如有从 previewData 同步的 alt，落盘至隐藏域。
-            // 为避免页面刷新时触发 afterStateUpdated，这里仅更新隐藏值，不派发 input/change。
             try {
                 if (hiddenChanged && hiddenEl) {
                     hiddenEl.value = JSON.stringify(hiddenArr);
                 }
-                // 标记已完成首轮回填，后续渲染不再覆盖用户编辑的 alt（字符串项升级为对象仍允许继续保持）
                 el._fm_altHydrated = true;
             } catch (e) {}
 
-            // enable drag-and-drop reorder
             function moveArray(a, from, to) {
                 const copy = a.slice();
                 const it = copy.splice(from, 1)[0];
@@ -402,7 +418,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 ch.addEventListener('dragstart', function(ev){
                     try { ev.dataTransfer.setData('text/plain', String(i)); } catch(e){}
                     ch.style.opacity = '0.5';
-                    // nice drag image
                     try {
                         const img = ch.querySelector('img');
                         if (img) {
@@ -442,7 +457,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     else to = wrapper.children.length - 1;
                     if (Number.isNaN(to) || from === to) return;
 
-                    // reorder input array
                     const inp = document.getElementById(inputId);
                     if (!inp) return;
                     let arrCur = [];
@@ -452,7 +466,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     inp.dispatchEvent(new Event('input', { bubbles: true }));
                     inp.dispatchEvent(new Event('change', { bubbles: true }));
 
-                    // reorder previewData when applicable
                     try {
                         if (previewData) {
                             if (Array.isArray(previewData)) {
@@ -467,7 +480,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         }
                     } catch (e) { console.error(e); }
 
-                    // re-render
                     renderPreview(inp.value);
                 } catch (e) { console.error(e); }
             });
@@ -498,7 +510,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
             } catch (e) { console.error(e); }
         }
 
-        // pull existing single alt from sidecar hidden input if present
         try {
             const altHidden = document.getElementById(inputId + '_alt');
             if (altHidden && typeof altHidden.value === 'string' && altHidden.value) {
@@ -539,8 +550,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
         const a2 = document.createElement('a');
         a2.href = u; a2.target = '_blank';
         const img2 = document.createElement('img');
-        img2.src = u; img2.style.maxWidth = '100%'; img2.style.maxHeight = '280px'; img2.style.borderRadius = '8px';
+        img2.style.maxWidth = '100%'; img2.style.maxHeight = '280px'; img2.style.borderRadius = '8px';
         img2.style.objectFit = 'contain';
+        observeOrSetSrc(img2, u);
         a2.appendChild(img2);
         box.appendChild(a2);
 
@@ -567,7 +579,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
         clearBtn.style.cursor = 'pointer';
         box.appendChild(clearBtn);
 
-        // single alt input
         const altWrap = document.createElement('div');
         altWrap.style.marginTop = '10px';
         altWrap.style.width = '100%';
@@ -581,7 +592,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
         altInput.style.padding = '8px 10px';
         altInput.style.border = '1px solid #e5e7eb';
         altInput.style.borderRadius = '8px';
-        altInput.style.background = '#fff';
         altInput.addEventListener('input', function(){
             try {
                 const altHidden = document.getElementById(inputId + '_alt');
@@ -601,7 +611,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
         altWrap.appendChild(altInput);
         box.appendChild(altWrap);
 
-        // keep alt hidden cleared when clearing selection
         clearBtn.addEventListener('click', function(){
             try {
                 const altHidden = document.getElementById(inputId + '_alt');
@@ -626,7 +635,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                             const v = (p.path || p.url || p);
                             const alt = (p.alt || '');
                             const item = (typeof v === 'string') ? { path: v, alt: alt } : { path: String(v || ''), alt: alt };
-                            // avoid duplicates by path
                             const exists = Array.isArray(arr) && arr.some(it => (typeof it === 'string' ? it === v : (it && (it.path === v))));
                             if (v && !exists) arr.push(item);
                         });
@@ -649,7 +657,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 }
             };
             let url = openUrl + (openUrl.indexOf('?') === -1 ? '?' : '&') + (isMultiple ? 'multiple=1' : '');
-            // try to pass last visited path to file manager (non-destructive)
             try {
                 const last = localStorage.getItem('ffm:lastPath');
                 if (last) {
@@ -666,7 +673,6 @@ window.fileManagerPickerUploadComponent = function (opts) {
             el.value = isMultiple ? '[]' : '';
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
-            // clear sidecar alt for single mode
             if (!isMultiple) {
                 try {
                     const altHidden = document.getElementById(inputId + '_alt');
@@ -681,12 +687,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
             if (!el) return;
             renderPreview(el.value);
 
-            // hookup livewire updates if necessary
             const observer = new MutationObserver(() => renderPreview(el.value));
             try { observer.observe(el, { attributes: true, childList: true, subtree: true }); } catch (e) {}
 
-            // attach event delegation handlers to preview container so buttons
-            // can be simple elements (TALL-friendly) and closures can handle logic
             try {
                 const previewEl = document.getElementById(previewSelector);
                 if (previewEl && !previewEl._fm_delegated) {
@@ -709,9 +712,8 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     });
                     previewEl._fm_delegated = true;
                 }
-            } catch (e) { /* ignore delegation errors */ }
+            } catch (e) { }
 
-            // 在表单提交前，确保所有可见的 alt 输入值都被同步回隐藏域
             try {
                 const formEl = el.closest && el.closest('form');
                 if (formEl && !formEl._fm_altSync) {
@@ -781,4 +783,3 @@ window.fileManagerPickerUploadComponent = function (opts) {
         @endif
     </div>
 </x-dynamic-component>
-
