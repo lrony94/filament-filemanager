@@ -138,6 +138,11 @@ class FileManagerPicker extends Field
         return $this->previewData;
     }
 
+    public function isInteractionDisabled(): bool
+    {
+        return $this->isDisabled();
+    }
+
     protected function setUp(): void
     {
         parent::setUp();

@@ -1,10 +1,12 @@
 @php
     $jsId = str_replace(['.', '[', ']', '-'], '_', $getId());
     $multiple = method_exists($field, 'isMultiple') ? $field->isMultiple() : false;
+    $isDisabled = method_exists($field, 'isInteractionDisabled') ? $field->isInteractionDisabled() : (method_exists($field, 'isDisabled') ? $field->isDisabled() : false);
     $pickerOpts = json_encode([
         'jsId' => $jsId,
         'statePath' => $getStatePath(),
         'isMultiple' => $multiple,
+        'isDisabled' => $isDisabled,
         'openUrl' => route('filament-filemanager.file-manager'),
         'previewSelector' => 'file-preview-' . $getId(),
         'inputId' => $getId(),
@@ -25,6 +27,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
         jsId,
         statePath,
         isMultiple,
+        isDisabled,
         openUrl,
         previewSelector,
         inputId,
@@ -109,6 +112,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
     // API methods (closure-scoped) — will be invoked via event delegation
     const api = {
         removeIndex(idx) {
+            if (isDisabled) return;
             try {
                 const el = document.getElementById(inputId);
                 if (!el) return;
@@ -148,6 +152,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
         },
 
         clearAll() {
+            if (isDisabled) return;
             try {
                 const el = document.getElementById(inputId);
                 if (!el) return;
@@ -337,21 +342,23 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     itemDiv.appendChild(dl);
                 }
 
-                const delBtn = document.createElement('button');
-                delBtn.type = 'button';
-                delBtn.textContent = '✕';
-                delBtn.className = 'fm-delete';
-                delBtn.setAttribute('data-idx', idx);
-                delBtn.style.position = 'absolute';
-                delBtn.style.top = '6px';
-                delBtn.style.right = '6px';
-                delBtn.style.background = 'rgba(0,0,0,0.6)';
-                delBtn.style.color = '#fff';
-                delBtn.style.border = '0';
-                delBtn.style.borderRadius = '6px';
-                delBtn.style.padding = '4px 6px';
-                delBtn.style.cursor = 'pointer';
-                itemDiv.appendChild(delBtn);
+                if (!isDisabled) {
+                    const delBtn = document.createElement('button');
+                    delBtn.type = 'button';
+                    delBtn.textContent = '✕';
+                    delBtn.className = 'fm-delete';
+                    delBtn.setAttribute('data-idx', idx);
+                    delBtn.style.position = 'absolute';
+                    delBtn.style.top = '6px';
+                    delBtn.style.right = '6px';
+                    delBtn.style.background = 'rgba(0,0,0,0.6)';
+                    delBtn.style.color = '#fff';
+                    delBtn.style.border = '0';
+                    delBtn.style.borderRadius = '6px';
+                    delBtn.style.padding = '4px 6px';
+                    delBtn.style.cursor = 'pointer';
+                    itemDiv.appendChild(delBtn);
+                }
 
                 const altInput = document.createElement('input');
                 altInput.type = 'text';
@@ -364,27 +371,31 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 altInput.style.padding = '6px 8px';
                 altInput.style.border = '1px solid #e5e7eb';
                 altInput.style.borderRadius = '8px';
-                altInput.style.background = '#fff';
-                altInput.addEventListener('input', function() {
-                    try { itemDiv.dataset.pendingAlt = altInput.value; } catch(e) {}
-                });
-                altInput.addEventListener('blur', function() {
-                    try {
-                        const el = document.getElementById(inputId);
-                        if (!el) return;
-                        let cur = [];
-                        try { cur = JSON.parse(el.value || '[]') || []; } catch(e){ cur = []; }
-                        if (!Array.isArray(cur)) cur = [];
-                        const pending = itemDiv.dataset && itemDiv.dataset.pendingAlt !== undefined ? itemDiv.dataset.pendingAlt : altInput.value;
-                        cur = cur.map((it, i) => {
-                            if (typeof it === 'string') return { path: it, alt: (i===idx ? pending : '') };
-                            return { path: (it.path || it.url || ''), alt: (i===idx ? pending : (it.alt || '')) };
-                        });
-                        el.value = JSON.stringify(cur);
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    } catch(e) {}
-                });
+                altInput.style.background = isDisabled ? '#f3f4f6' : '#fff';
+                altInput.readOnly = isDisabled;
+                altInput.disabled = isDisabled;
+                if (!isDisabled) {
+                    altInput.addEventListener('input', function() {
+                        try { itemDiv.dataset.pendingAlt = altInput.value; } catch(e) {}
+                    });
+                    altInput.addEventListener('blur', function() {
+                        try {
+                            const el = document.getElementById(inputId);
+                            if (!el) return;
+                            let cur = [];
+                            try { cur = JSON.parse(el.value || '[]') || []; } catch(e){ cur = []; }
+                            if (!Array.isArray(cur)) cur = [];
+                            const pending = itemDiv.dataset && itemDiv.dataset.pendingAlt !== undefined ? itemDiv.dataset.pendingAlt : altInput.value;
+                            cur = cur.map((it, i) => {
+                                if (typeof it === 'string') return { path: it, alt: (i===idx ? pending : '') };
+                                return { path: (it.path || it.url || ''), alt: (i===idx ? pending : (it.alt || '')) };
+                            });
+                            el.value = JSON.stringify(cur);
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch(e) {}
+                    });
+                }
                 itemDiv.appendChild(altInput);
 
                 const nameDiv = document.createElement('div');
@@ -412,77 +423,81 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 return copy;
             }
 
-            Array.from(wrapper.children).forEach(function(ch, i){
-                ch.setAttribute('draggable', 'true');
-                ch.setAttribute('data-idx', i);
-                ch.addEventListener('dragstart', function(ev){
-                    try { ev.dataTransfer.setData('text/plain', String(i)); } catch(e){}
-                    ch.style.opacity = '0.5';
-                    try {
-                        const img = ch.querySelector('img');
-                        if (img) {
-                            const d = img.cloneNode(true);
-                            d.style.width = '160px'; d.style.height = '120px'; d.style.objectFit = 'cover'; d.style.borderRadius = '8px';
-                            d.style.position = 'absolute'; d.style.left = '-9999px';
-                            document.body.appendChild(d);
-                            try { ev.dataTransfer.setDragImage(d, 80, 60); } catch (e) {}
-                            setTimeout(()=>{ try{ document.body.removeChild(d); }catch(e){} }, 0);
-                        }
-                    } catch (e) {}
+            if (!isDisabled) {
+                Array.from(wrapper.children).forEach(function(ch, i){
+                    ch.setAttribute('draggable', 'true');
+                    ch.setAttribute('data-idx', i);
+                    ch.addEventListener('dragstart', function(ev){
+                        try { ev.dataTransfer.setData('text/plain', String(i)); } catch(e){}
+                        ch.style.opacity = '0.5';
+                        try {
+                            const img = ch.querySelector('img');
+                            if (img) {
+                                const d = img.cloneNode(true);
+                                d.style.width = '160px'; d.style.height = '120px'; d.style.objectFit = 'cover'; d.style.borderRadius = '8px';
+                                d.style.position = 'absolute'; d.style.left = '-9999px';
+                                document.body.appendChild(d);
+                                try { ev.dataTransfer.setDragImage(d, 80, 60); } catch (e) {}
+                                setTimeout(()=>{ try{ document.body.removeChild(d); }catch(e){} }, 0);
+                            }
+                        } catch (e) {}
+                    });
+                    ch.addEventListener('dragend', function(){ ch.style.opacity = ''; removeHighlights(); });
                 });
-                ch.addEventListener('dragend', function(){ ch.style.opacity = ''; removeHighlights(); });
-            });
+            }
 
             function removeHighlights(){ Array.from(wrapper.querySelectorAll('[data-idx]')).forEach(function(c){ c.style.outline=''; c.style.boxShadow=''; }); }
 
-            wrapper.addEventListener('dragover', function(ev){
-                ev.preventDefault();
-                try {
-                    const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
-                    removeHighlights();
-                    if (targetEl) {
-                        targetEl.style.outline = '3px dashed rgba(37,99,235,0.9)';
-                        targetEl.style.boxShadow = '0 6px 18px rgba(37,99,235,0.12)';
-                    }
-                } catch (e) {}
-            });
-            wrapper.addEventListener('drop', function(ev){
-                ev.preventDefault();
-                try {
-                    const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
-                    if (Number.isNaN(from)) return;
-                    const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
-                    let to = null;
-                    if (targetEl) to = parseInt(targetEl.getAttribute('data-idx'), 10);
-                    else to = wrapper.children.length - 1;
-                    if (Number.isNaN(to) || from === to) return;
-
-                    const inp = document.getElementById(inputId);
-                    if (!inp) return;
-                    let arrCur = [];
-                    try { arrCur = JSON.parse(inp.value || '[]') || []; } catch(e){ arrCur = []; }
-                    const newArr = moveArray(arrCur, from, to);
-                    inp.value = JSON.stringify(newArr);
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-
+            if (!isDisabled) {
+                wrapper.addEventListener('dragover', function(ev){
+                    ev.preventDefault();
                     try {
-                        if (previewData) {
-                            if (Array.isArray(previewData)) {
-                                previewData = moveArray(previewData, from, to);
-                            } else if (Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
-                                previewData.thumb = moveArray(previewData.thumb, from, to);
-                                previewData.origin = moveArray(previewData.origin, from, to);
-                                if (Array.isArray(previewData.alt)) {
-                                    previewData.alt = moveArray(previewData.alt, from, to);
+                        const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
+                        removeHighlights();
+                        if (targetEl) {
+                            targetEl.style.outline = '3px dashed rgba(37,99,235,0.9)';
+                            targetEl.style.boxShadow = '0 6px 18px rgba(37,99,235,0.12)';
+                        }
+                    } catch (e) {}
+                });
+                wrapper.addEventListener('drop', function(ev){
+                    ev.preventDefault();
+                    try {
+                        const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
+                        if (Number.isNaN(from)) return;
+                        const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
+                        let to = null;
+                        if (targetEl) to = parseInt(targetEl.getAttribute('data-idx'), 10);
+                        else to = wrapper.children.length - 1;
+                        if (Number.isNaN(to) || from === to) return;
+
+                        const inp = document.getElementById(inputId);
+                        if (!inp) return;
+                        let arrCur = [];
+                        try { arrCur = JSON.parse(inp.value || '[]') || []; } catch(e){ arrCur = []; }
+                        const newArr = moveArray(arrCur, from, to);
+                        inp.value = JSON.stringify(newArr);
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+
+                        try {
+                            if (previewData) {
+                                if (Array.isArray(previewData)) {
+                                    previewData = moveArray(previewData, from, to);
+                                } else if (Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
+                                    previewData.thumb = moveArray(previewData.thumb, from, to);
+                                    previewData.origin = moveArray(previewData.origin, from, to);
+                                    if (Array.isArray(previewData.alt)) {
+                                        previewData.alt = moveArray(previewData.alt, from, to);
+                                    }
                                 }
                             }
-                        }
-                    } catch (e) { console.error(e); }
+                        } catch (e) { console.error(e); }
 
-                    renderPreview(inp.value);
-                } catch (e) { console.error(e); }
-            });
+                        renderPreview(inp.value);
+                    } catch (e) { console.error(e); }
+                });
+            }
 
             el.appendChild(wrapper);
             return;
@@ -564,20 +579,29 @@ window.fileManagerPickerUploadComponent = function (opts) {
             box.appendChild(dl2);
         }
 
-        const clearBtn = document.createElement('button');
-        clearBtn.type = 'button';
-        clearBtn.textContent = 'Clear';
-        clearBtn.className = 'fm-clear';
-        clearBtn.style.position = 'absolute';
-        clearBtn.style.top = '8px';
-        clearBtn.style.right = '8px';
-        clearBtn.style.background = 'rgba(0,0,0,0.6)';
-        clearBtn.style.color = '#fff';
-        clearBtn.style.border = '0';
-        clearBtn.style.borderRadius = '6px';
-        clearBtn.style.padding = '6px 8px';
-        clearBtn.style.cursor = 'pointer';
-        box.appendChild(clearBtn);
+        if (!isDisabled) {
+            const clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.textContent = 'Clear';
+            clearBtn.className = 'fm-clear';
+            clearBtn.style.position = 'absolute';
+            clearBtn.style.top = '8px';
+            clearBtn.style.right = '8px';
+            clearBtn.style.background = 'rgba(0,0,0,0.6)';
+            clearBtn.style.color = '#fff';
+            clearBtn.style.border = '0';
+            clearBtn.style.borderRadius = '6px';
+            clearBtn.style.padding = '6px 8px';
+            clearBtn.style.cursor = 'pointer';
+            box.appendChild(clearBtn);
+
+            clearBtn.addEventListener('click', function(){
+                try {
+                    const altHidden = document.getElementById(inputId + '_alt');
+                    if (altHidden) altHidden.value = '';
+                } catch (e) {}
+            });
+        }
 
         const altWrap = document.createElement('div');
         altWrap.style.marginTop = '10px';
@@ -592,37 +616,36 @@ window.fileManagerPickerUploadComponent = function (opts) {
         altInput.style.padding = '8px 10px';
         altInput.style.border = '1px solid #e5e7eb';
         altInput.style.borderRadius = '8px';
-        altInput.addEventListener('input', function(){
-            try {
-                const altHidden = document.getElementById(inputId + '_alt');
-                if (altHidden) { altHidden.value = altInput.value; }
-            } catch (e) {}
-        });
-        altInput.addEventListener('blur', function(){
-            try {
-                const altHidden = document.getElementById(inputId + '_alt');
-                if (altHidden) {
-                    altHidden.value = altInput.value;
-                    altHidden.dispatchEvent(new Event('input', { bubbles: true }));
-                    altHidden.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            } catch (e) {}
-        });
+        altInput.style.background = isDisabled ? '#f3f4f6' : '#fff';
+        altInput.readOnly = isDisabled;
+        altInput.disabled = isDisabled;
+        if (!isDisabled) {
+            altInput.addEventListener('input', function(){
+                try {
+                    const altHidden = document.getElementById(inputId + '_alt');
+                    if (altHidden) { altHidden.value = altInput.value; }
+                } catch (e) {}
+            });
+            altInput.addEventListener('blur', function(){
+                try {
+                    const altHidden = document.getElementById(inputId + '_alt');
+                    if (altHidden) {
+                        altHidden.value = altInput.value;
+                        altHidden.dispatchEvent(new Event('input', { bubbles: true }));
+                        altHidden.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } catch (e) {}
+            });
+        }
         altWrap.appendChild(altInput);
         box.appendChild(altWrap);
-
-        clearBtn.addEventListener('click', function(){
-            try {
-                const altHidden = document.getElementById(inputId + '_alt');
-                if (altHidden) altHidden.value = '';
-            } catch (e) {}
-        });
 
         el.appendChild(box);
     }
 
     return {
         openPicker() {
+            if (isDisabled) return;
             const instanceKey = jsId + '_' + (new Date().getTime()) + '_' + Math.floor(Math.random() * 100000);
             window.__fileManagerSelectCallbacks = window.__fileManagerSelectCallbacks || {};
             window.__fileManagerSelectCallbacks[instanceKey] = (payload) => {
@@ -668,6 +691,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
         },
 
         clear() {
+            if (isDisabled) return;
             const el = document.getElementById(inputId);
             if (!el) return;
             el.value = isMultiple ? '[]' : '';
@@ -761,8 +785,13 @@ window.fileManagerPickerUploadComponent = function (opts) {
         <div id="file-preview-{{ $getId() }}" style="margin-bottom:1rem;width:100%"></div>
 
         <div style="display:flex;gap:8px;align-items:center;">
-            <button type="button" class="fi-btn" x-on:click="openPicker()" id="browse-btn-{{ $getId() }}">Browse</button>
-            <button type="button" class="fi-btn" x-on:click="clear()">Clear</button>
+            @if ($isDisabled)
+                <button type="button" class="fi-btn" x-on:click="openPicker()" id="browse-btn-{{ $getId() }}" disabled style="opacity:.45;cursor:not-allowed;pointer-events:none;">Browse</button>
+                <button type="button" class="fi-btn" x-on:click="clear()" disabled style="opacity:.45;cursor:not-allowed;pointer-events:none;">Clear</button>
+            @else
+                <button type="button" class="fi-btn" x-on:click="openPicker()" id="browse-btn-{{ $getId() }}">Browse</button>
+                <button type="button" class="fi-btn" x-on:click="clear()">Clear</button>
+            @endif
         </div>
 
         <input
