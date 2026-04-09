@@ -109,6 +109,101 @@ window.fileManagerPickerUploadComponent = function (opts) {
         } catch (e) { return String(p || ''); }
     }
 
+    function decodeDisplayName(value) {
+        const name = String(value || '').split('/').pop() || '';
+        try {
+            return decodeURIComponent(name);
+        } catch (e) {
+            return name;
+        }
+    }
+
+    function isSameStoredValue(left, right) {
+        const leftValue = normalizePath(left);
+        const rightValue = normalizePath(right);
+
+        if (!leftValue || !rightValue) {
+            return false;
+        }
+
+        if (leftValue === rightValue) {
+            return true;
+        }
+
+        return decodeDisplayName(leftValue) === decodeDisplayName(rightValue);
+    }
+
+    function isExternalUrl(value) {
+        const url = String(value || '').trim();
+        return /^https?:\/\//i.test(url) || url.startsWith('//');
+    }
+
+    function isFileManagerRoute(value) {
+        const url = String(value || '').trim();
+
+        return url.startsWith('/filament-filemanager/')
+            || /^https?:\/\/[^\/]+\/filament-filemanager\//i.test(url);
+    }
+
+    function normalizeLocalRoutePath(value) {
+        if (!value) return '';
+
+        try {
+            let path = String(value).trim();
+            if (!path) return '';
+
+            if (/^https?:\/\//i.test(path)) {
+                const parsed = new URL(path, window.location.origin);
+                return parsed.pathname || '';
+            }
+
+            if (path.startsWith('//')) {
+                const parsed = new URL(window.location.protocol + path);
+                return parsed.pathname || '';
+            }
+
+            return path;
+        } catch (e) {
+            return String(value || '').trim();
+        }
+    }
+
+    function buildPreviewLink(value) {
+        if (!value) return null;
+
+        const raw = String(value).trim();
+        if (!raw) return null;
+
+        // Respect already-resolved web paths from backend previewData thumb values.
+        if (raw.startsWith('/') || isExternalUrl(raw) || isFileManagerRoute(raw)) {
+            return raw;
+        }
+
+        const localPath = normalizeLocalRoutePath(raw);
+        const encoded = btoa(unescape(encodeURIComponent(String(localPath)))).replace(/=/g, '');
+
+        return previewBase
+            ? (previewBase.replace(/\/$/, '') + '/' + encoded)
+            : ('/filament-filemanager/file-preview/' + encoded);
+    }
+
+    function buildDownloadLink(value) {
+        if (!value) return null;
+
+        const raw = String(value).trim();
+        if (!raw) return null;
+
+        if (isExternalUrl(raw) || isFileManagerRoute(raw)) {
+            return raw;
+        }
+
+        const localPath = normalizeLocalRoutePath(raw);
+
+        return downloadBase
+            ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(localPath)))
+            : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(localPath)));
+    }
+
     // API methods (closure-scoped) — will be invoked via event delegation
     const api = {
         removeIndex(idx) {
@@ -208,7 +303,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
             arr.forEach((v, idx) => {
                 const pth = (v && typeof v === 'object') ? (v.path || '') : String(v || '');
                 let altVal = (v && typeof v === 'object') ? (v.alt || '') : '';
-                const name = String(pth).split('/').pop();
+                const name = decodeDisplayName(pth);
 
                 // Find corresponding thumb/origin in previewData
                 let thumbs = null;
@@ -285,20 +380,15 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 let previewUrl = null;
                 if (thumbs) previewUrl = Array.isArray(thumbs) ? thumbs[0] : thumbs;
                 if (!previewUrl) {
-                    const encoded = btoa(unescape(encodeURIComponent(String(pth)))).replace(/=/g, '');
-                    previewUrl = /^https?:\/\//i.test(pth) || pth.startsWith('/')
-                        ? pth
-                        : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + encoded) : ('/filament-filemanager/file-preview/' + encoded));
+                    previewUrl = buildPreviewLink(pth);
                 }
 
                 let downloadUrl = null;
                 if (origins) downloadUrl = Array.isArray(origins) ? origins[0] : origins;
                 if (downloadUrl) {
-                    if (!/^https?:\/\//i.test(downloadUrl) && !downloadUrl.startsWith('/')) {
-                        downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(downloadUrl))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(downloadUrl)));
-                    }
+                    downloadUrl = buildDownloadLink(downloadUrl) || downloadUrl;
                 } else {
-                    downloadUrl = downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(pth))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(pth)));
+                    downloadUrl = buildDownloadLink(pth);
                 }
 
                 const itemDiv = document.createElement('div');
@@ -511,13 +601,16 @@ window.fileManagerPickerUploadComponent = function (opts) {
         let singleAlt = '';
         if (previewData) {
             try {
-                if (previewData.thumb && previewData.origin) {
+                const previewValue = previewData.value || previewData.path || previewData.origin || null;
+                const previewMatchesValue = previewValue ? isSameStoredValue(previewValue, value) : false;
+
+                if (previewData.thumb && previewData.origin && previewMatchesValue) {
                     singleThumb = Array.isArray(previewData.thumb) ? previewData.thumb[0] : previewData.thumb;
                     singleOrigin = Array.isArray(previewData.origin) ? previewData.origin[0] : previewData.origin;
                     if (previewData.alt) {
                         singleAlt = Array.isArray(previewData.alt) ? (previewData.alt[0] || '') : (previewData.alt || '');
                     }
-                } else if (previewData.value === value) {
+                } else if (previewData.value && isSameStoredValue(previewData.value, value)) {
                     singleThumb = previewData.thumb || null;
                     singleOrigin = previewData.origin || null;
                     if (typeof previewData.alt === 'string') singleAlt = previewData.alt || '';
@@ -532,14 +625,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
             }
         } catch (e) {}
 
-        const encoded = btoa(unescape(encodeURIComponent(String(value)))).replace(/=/g, '');
-        const u = singleThumb
-            ? (/^https?:\/\//i.test(singleThumb) || singleThumb.startsWith('/') ? singleThumb : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + singleThumb) : ('/filament-filemanager/file-preview/' + encoded)))
-            : (/^https?:\/\//i.test(value) || value.startsWith('/') ? value : (previewBase ? (previewBase.replace(/\/$/, '') + '/' + encoded) : ('/filament-filemanager/file-preview/' + encoded)));
-        const name = String(value).split('/').pop();
-        const downloadLink = (singleOrigin
-            ? (/^https?:\/\//i.test(singleOrigin) || singleOrigin.startsWith('/') ? singleOrigin : (downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(singleOrigin))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(singleOrigin)))))
-            : (downloadBase ? (downloadBase.replace(/\/$/, '') + '/' + encodeURIComponent(String(value))) : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(value)))));
+        const u = singleThumb ? (buildPreviewLink(singleThumb) || buildPreviewLink(value)) : buildPreviewLink(value);
+        const name = decodeDisplayName(value);
+        const downloadLink = singleOrigin ? (buildDownloadLink(singleOrigin) || buildDownloadLink(value)) : buildDownloadLink(value);
 
         const box = document.createElement('div');
         box.style.maxWidth = '100%';
