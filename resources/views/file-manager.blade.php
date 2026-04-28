@@ -285,7 +285,8 @@
                 <button onclick="promptCreateFolder(); hideAddMenu()">➕ Create folder</button>
             </div>
         </div>
-        <input id="picker" type="file"/>
+        @php $ffmAccept = array_map(fn($e) => '.'.$e, config('filament-filemanager.allowed_mimes', [])); @endphp
+        <input id="picker" type="file" {{ $ffmAccept ? 'accept="'.implode(',', $ffmAccept).'"' : '' }}/>
         <!-- <input id="altInput" type="text" placeholder="Alt text (optional)" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;width:260px;" /> -->
     </div>
 </header>
@@ -395,6 +396,8 @@
 
     const currentPath = @js($path ?? '');
     const currentDisk = @js($disk ?? 'local');
+    const ffmAllowedExts = @json(config('filament-filemanager.allowed_mimes', []));
+    const ffmMaxKb = {{ (int) config('filament-filemanager.max_file_size', 0) }};
     const isMultipleMode = (new URL(window.location.href)).searchParams.get('multiple') === '1';
     // Remember last visited path on load for next openings. If this opener has no path, try restoring saved path.
     try {
@@ -878,6 +881,22 @@
         picker.addEventListener('change', async (e) => {
             const file = e.target.files?.[0];
             if (!file) return;
+            // Client-side pre-validation: file type
+            if (ffmAllowedExts.length) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                if (!ffmAllowedExts.includes(ext)) {
+                    alert('Unsupported file type.\nAllowed types: ' + ffmAllowedExts.join(', '));
+                    e.target.value = '';
+                    return;
+                }
+            }
+            // Client-side pre-validation: file size
+            if (ffmMaxKb && file.size > ffmMaxKb * 1024) {
+                const maxMb = (ffmMaxKb / 1024).toFixed(1);
+                alert('File size exceeds the limit (max ' + maxMb + ' MB).\nSelected file: ' + (file.size / 1024 / 1024).toFixed(2) + ' MB');
+                e.target.value = '';
+                return;
+            }
             const form = new FormData();
             form.append('file', file);
             form.append('path', normalizePath(currentPath));
@@ -895,7 +914,13 @@
                 let data = {};
                 try { data = await res.json(); } catch (_) { data = {}; }
                 if (!res.ok || data?.ok === false) {
-                    const msg = (data && data.error) ? data.error : 'Upload failed';
+                    const msg = (data && data.error)
+                        ? data.error
+                        : (data && data.errors?.file?.[0])
+                            ? data.errors.file[0]
+                            : (data && data.message)
+                                ? data.message
+                                : 'Upload failed';
                     alert(msg);
                     return;
                 }

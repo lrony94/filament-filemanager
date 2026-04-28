@@ -393,8 +393,10 @@ class FileManagerController
     {
         $allowedMimes = config('filament-filemanager.allowed_mimes', []);
         $mimeRule = $allowedMimes ? ['mimes:' . implode(',', $allowedMimes)] : [];
+        $maxKb = config('filament-filemanager.max_file_size', null);
+        $maxRule = $maxKb ? ['max:' . (int) $maxKb] : [];
         $request->validate([
-            'file' => array_merge(['required', 'file'], $mimeRule),
+            'file' => array_merge(['required', 'file'], $mimeRule, $maxRule),
             'path' => ['nullable', 'string'],
         ]);
         $file = $request->file('file');
