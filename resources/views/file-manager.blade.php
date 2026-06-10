@@ -286,7 +286,7 @@
             </div>
         </div>
         @php $ffmAccept = array_map(fn($e) => '.'.$e, config('filament-filemanager.allowed_mimes', [])); @endphp
-        <input id="picker" type="file" {{ $ffmAccept ? 'accept="'.implode(',', $ffmAccept).'"' : '' }}/>
+        <input id="picker" type="file" @if($ffmAccept) accept="{{ implode(',', $ffmAccept) }}" @endif />
         <!-- <input id="altInput" type="text" placeholder="Alt text (optional)" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;width:260px;" /> -->
     </div>
 </header>
