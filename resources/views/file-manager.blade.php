@@ -264,29 +264,49 @@
         }
         .loading-text { color: #111827; font-weight: 600; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        /* Upload progress bar */
+        .upload-progress-wrap { width: 220px; background: #e5e7eb; border-radius: 4px; height: 6px; display: none; }
+        .upload-progress-bar { height: 100%; background: #2563eb; border-radius: 4px; transition: width 0.25s ease; width: 0%; }
+        /* Toast */
+        .ffm-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #111827; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 500; z-index: 2000; opacity: 0; transition: opacity 0.3s; pointer-events: none; white-space: nowrap; }
+        .ffm-toast.show { opacity: 1; }
+        /* Drag-and-drop overlay */
+        .ffm-drag-overlay { position: fixed; inset: 0; background: rgba(37,99,235,0.08); border: 3px dashed #2563eb; z-index: 900; display: none; align-items: center; justify-content: center; pointer-events: none; box-sizing: border-box; }
+        .ffm-drag-overlay.active { display: flex; }
+        .ffm-drag-label { font-size: 24px; font-weight: 700; color: #2563eb; }
     </style>
 </head>
 <body>
+<div id="ffmDragOverlay" class="ffm-drag-overlay"><span class="ffm-drag-label">⬆️ Drop files to upload</span></div>
+<div id="ffmToast" class="ffm-toast"></div>
 <div id="loadingOverlay" class="loading-overlay">
     <div class="loading-box">
         <div class="loading-spinner"></div>
         <div id="loadingText" class="loading-text">Loading...</div>
+        <div id="ffmProgressWrap" class="upload-progress-wrap"><div id="ffmProgressBar" class="upload-progress-bar"></div></div>
     </div>
-    </div>
+</div>
 <header>
     <h1>Files</h1>
     <div class="toolbar">
-        <input id="search" class="search" placeholder="Search" oninput="render()"/>
+        <input id="search" class="search" placeholder="Search" oninput="ffmSearch()"/>
         <button class="view-toggle" onclick="toggleView()" id="viewBtn">List</button>
         <div class="dropdown">
             <button class="plus-btn" onclick="toggleAddMenu(event)">+</button>
             <div id="addMenu" class="menu">
                 <button onclick="document.getElementById('picker').click(); hideAddMenu()">⬆️ Upload file</button>
                 <button onclick="promptCreateFolder(); hideAddMenu()">➕ Create folder</button>
+                @php
+                    $ffmMaxMb = number_format(config('filament-filemanager.max_file_size', 10240) / 1024, 0);
+                    $ffmMimes = implode(', ', config('filament-filemanager.allowed_mimes', []));
+                @endphp
+                <p style="margin:4px 8px 2px;font-size:11px;color:#6b7280;line-height:1.4;pointer-events:none;">
+                    Max {{ $ffmMaxMb }} MB{{ $ffmMimes ? ' · ' . $ffmMimes : '' }}
+                </p>
             </div>
         </div>
         @php $ffmAccept = array_map(fn($e) => '.'.$e, config('filament-filemanager.allowed_mimes', [])); @endphp
-        <input id="picker" type="file" @if($ffmAccept) accept="{{ implode(',', $ffmAccept) }}" @endif />
+        <input id="picker" type="file" multiple @if($ffmAccept) accept="{{ implode(',', $ffmAccept) }}" @endif />
         <!-- <input id="altInput" type="text" placeholder="Alt text (optional)" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;width:260px;" /> -->
     </div>
 </header>
@@ -329,20 +349,45 @@
     </thead>
     <tbody id="filesTbody"></tbody>
 </table>
+<div id="ffmLoadMore" style="display:none; justify-content:center; padding:20px 0 8px;">
+    <button class="view-toggle" onclick="loadMoreItems()" style="padding:10px 32px; font-size:14px;">Load more</button>
+</div>
 
 <script>
-    function showLoading(text) {
+    function showLoading(text, progress) {
         try {
             const o = document.getElementById('loadingOverlay');
             const t = document.getElementById('loadingText');
+            const pw = document.getElementById('ffmProgressWrap');
+            const pb = document.getElementById('ffmProgressBar');
             if (t && typeof text === 'string') t.textContent = text;
             if (o) o.style.display = 'flex';
+            if (pw && pb) {
+                if (progress != null) {
+                    pw.style.display = 'block';
+                    pb.style.width = Math.max(0, Math.min(100, progress)) + '%';
+                } else {
+                    pw.style.display = 'none';
+                }
+            }
         } catch (e) {}
     }
     function hideLoading() {
         try {
             const o = document.getElementById('loadingOverlay');
+            const pw = document.getElementById('ffmProgressWrap');
             if (o) o.style.display = 'none';
+            if (pw) pw.style.display = 'none';
+        } catch (e) {}
+    }
+    function showToast(msg, duration) {
+        try {
+            const t = document.getElementById('ffmToast');
+            if (!t) return;
+            t.textContent = msg;
+            t.classList.add('show');
+            clearTimeout(t._ffmTimer);
+            t._ffmTimer = setTimeout(() => t.classList.remove('show'), duration || 2500);
         } catch (e) {}
     }
     function selectFile(payload) {
@@ -591,6 +636,19 @@
         }
     }
 
+    const FFM_PAGE_SIZE = 50;
+    let ffmRenderedCount = FFM_PAGE_SIZE;
+
+    function ffmSearch() {
+        ffmRenderedCount = FFM_PAGE_SIZE;
+        render();
+    }
+
+    function loadMoreItems() {
+        ffmRenderedCount += FFM_PAGE_SIZE;
+        render();
+    }
+
     function render() {
         const q = (document.getElementById('search')?.value || '').toLowerCase();
         const folders = initialDirs
@@ -602,6 +660,14 @@
             .filter(f => !q || f.name.toLowerCase().includes(q))
             .map(f => ({...f, _type: 'file'}));
         const data = [...folders, ...files];
+        const visible = data.slice(0, ffmRenderedCount);
+        const remaining = data.length - visible.length;
+        const ffmLm = document.getElementById('ffmLoadMore');
+        if (ffmLm) {
+            ffmLm.style.display = remaining > 0 ? 'flex' : 'none';
+            const ffmLmBtn = ffmLm.querySelector('button');
+            if (ffmLmBtn) ffmLmBtn.textContent = 'Load ' + Math.min(FFM_PAGE_SIZE, remaining) + ' more  (' + visible.length + ' / ' + data.length + ')';
+        }
 
         const table = document.getElementById('filesTable');
         const grid = document.getElementById('filesGrid');
@@ -610,12 +676,12 @@
             table.style.display = '';
             grid.style.display = 'none';
             body.innerHTML = '';
-            data.forEach(f => {
+            visible.forEach(f => {
                 const tr = document.createElement('tr');
                 const isImg = f._type === 'file' && imageExts.includes(f.ext);
                 const icon = f._type === 'dir'
                     ? `<span style="display:inline-flex;width:28px;height:28px;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></span>`
-                    : (isImg ? `<img src="/filament-filemanager/file-preview/${base64url(f.path)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:8px;">` : `<span style="display:inline-flex;width:28px;height:28px;border:1px solid #e5e7eb;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;">📄</span>`);
+                    : (isImg ? `<img src="/filament-filemanager/file-preview/${base64url(f.path)}" loading="lazy" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:8px;">` : `<span style="display:inline-flex;width:28px;height:28px;border:1px solid #e5e7eb;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;">📄</span>`);
                 const mid = base64Id(f.path);
                 const checkboxCell = f._type === 'file' ? `<input type=\"checkbox\" data-type=\"file\" data-path=\"${f.path}\" ${selected.has(f.path) ? 'checked' : ''}>` : '';
         tr.innerHTML = `
@@ -647,7 +713,7 @@
             table.style.display = 'none';
             grid.style.display = '';
             grid.innerHTML = '';
-            data.forEach(f => {
+            visible.forEach(f => {
                 const card = document.createElement('div');
                 card.className = 'card';
                 card.onclick = () => onItemClick(f._type, f.path, f.url);
@@ -655,7 +721,7 @@
                 const isImg = f._type === 'file' && imageExts.includes(f.ext);
                 const content = f._type === 'dir'
                     ? `<div class="thumb"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="96" height="72"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></div>`
-                    : (isImg ? `<img class="thumb" src="/filament-filemanager/file-preview/${base64url(f.path)}">` : `<div class="thumb"><span style="display:inline-flex;width:64px;height:64px;border:1px solid #e5e7eb;border-radius:8px;align-items:center;justify-content:center;">📄</span></div>`);
+                    : (isImg ? `<img class="thumb" loading="lazy" src="/filament-filemanager/file-preview/${base64url(f.path)}">` : `<div class="thumb"><span style="display:inline-flex;width:64px;height:64px;border:1px solid #e5e7eb;border-radius:8px;align-items:center;justify-content:center;">📄</span></div>`);
                 card.innerHTML = `
                         ${content}
                         <div class="name">${f.name}</div>
@@ -877,31 +943,48 @@
 
     const picker = document.getElementById('picker');
     const altInput = document.getElementById('altInput');
-    if (picker) {
-        picker.addEventListener('change', async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            // Client-side pre-validation: file type
+
+    async function uploadFiles(files) {
+        files = Array.from(files);
+        if (!files.length) return;
+
+        const altText = (altInput?.value || '').trim();
+        const uploaded = [];
+        const errors = [];
+
+        // Validate all files first, collect errors in batch
+        const validFiles = files.filter(file => {
             if (ffmAllowedExts.length) {
                 const ext = file.name.split('.').pop().toLowerCase();
                 if (!ffmAllowedExts.includes(ext)) {
-                    alert('Unsupported file type.\nAllowed types: ' + ffmAllowedExts.join(', '));
-                    e.target.value = '';
-                    return;
+                    errors.push(file.name + ': unsupported type');
+                    return false;
                 }
             }
-            // Client-side pre-validation: file size
             if (ffmMaxKb && file.size > ffmMaxKb * 1024) {
-                const maxMb = (ffmMaxKb / 1024).toFixed(1);
-                alert('File size exceeds the limit (max ' + maxMb + ' MB).\nSelected file: ' + (file.size / 1024 / 1024).toFixed(2) + ' MB');
-                e.target.value = '';
-                return;
+                errors.push(file.name + ': exceeds ' + (ffmMaxKb / 1024).toFixed(1) + ' MB');
+                return false;
             }
+            return true;
+        });
+
+        if (errors.length) {
+            const hint = ffmAllowedExts.length ? '\n\nAllowed: ' + ffmAllowedExts.join(', ') : '';
+            alert('Cannot upload the following files:\n\n' + errors.join('\n') + hint);
+            if (!validFiles.length) return;
+        }
+
+        const total = validFiles.length;
+        for (let i = 0; i < total; i++) {
+            const file = validFiles[i];
             const form = new FormData();
             form.append('file', file);
             form.append('path', normalizePath(currentPath));
             try {
-                showLoading('Uploading...');
+                showLoading(
+                    total > 1 ? `Uploading ${i + 1} / ${total}...` : 'Uploading...',
+                    total > 1 ? Math.round((i / total) * 100) : null
+                );
                 const res = await fetch(`{{ route('filament-filemanager.upload') }}`, {
                     method: 'POST',
                     headers: {
@@ -914,46 +997,77 @@
                 let data = {};
                 try { data = await res.json(); } catch (_) { data = {}; }
                 if (!res.ok || data?.ok === false) {
-                    const msg = (data && data.error)
-                        ? data.error
-                        : (data && data.errors?.file?.[0])
-                            ? data.errors.file[0]
-                            : (data && data.message)
-                                ? data.message
-                                : 'Upload failed';
-                    alert(msg);
-                    return;
+                    const msg = (data && data.error) ? data.error
+                        : (data && data.errors?.file?.[0]) ? data.errors.file[0]
+                        : (data && data.message) ? data.message : 'Upload failed';
+                    errors.push(file.name + ': ' + msg);
+                    continue;
                 }
-                // capture alt text from input box (optional)
-                const altText = (altInput?.value || '').trim();
-                // add to list immediately
-                initialFiles.unshift({
-                    name: data.name,
-                    url: data.url,
-                    ext: data.ext,
-                    path: normalizePath(data.path),
-                    size: data.size,
-                    mtime: data.mtime,
-                    alt: altText,
-                });
-                render();
-                // 在单选模式下立即返回；多选模式仅加入列表与勾选
-                if (!isMultipleMode) {
-                    selectFile({url: data.url, path: data.path, alt: altText});
-                } else {
-                    selected.add(normalizePath(data.path));
-                    updateSelectionUI();
-                }
+                const entry = {
+                    name: data.name, url: data.url, ext: data.ext,
+                    path: normalizePath(data.path), size: data.size, mtime: data.mtime, alt: altText,
+                };
+                initialFiles.unshift(entry);
+                uploaded.push(entry);
+                if (isMultipleMode) selected.add(normalizePath(data.path));
             } catch (err) {
-                alert('Upload failed');
+                errors.push(file.name + ': Network error');
                 console.error(err);
-            } finally {
-                hideLoading();
-                e.target.value = '';
-                if (altInput) altInput.value = '';
             }
+        }
+
+        hideLoading();
+        if (altInput) altInput.value = '';
+
+        if (!uploaded.length) {
+            if (errors.length) alert('Upload failed:\n\n' + errors.join('\n'));
+            return;
+        }
+
+        render();
+
+        if (!isMultipleMode) {
+            const last = uploaded[uploaded.length - 1];
+            selectFile({url: last.url, path: last.path, alt: altText});
+        } else {
+            updateSelectionUI();
+            showToast('Uploaded ' + uploaded.length + (uploaded.length === 1 ? ' file' : ' files') + ' successfully');
+        }
+
+        if (errors.length) {
+            setTimeout(() => alert('Some files failed to upload:\n\n' + errors.join('\n')), 300);
+        }
+    }
+
+    if (picker) {
+        picker.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = '';
+            await uploadFiles(files);
         });
     }
+
+    // Drag-and-drop upload
+    const ffmDragOverlay = document.getElementById('ffmDragOverlay');
+    let ffmDragCounter = 0;
+    document.addEventListener('dragenter', (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        ffmDragCounter++;
+        if (ffmDragOverlay) ffmDragOverlay.classList.add('active');
+    });
+    document.addEventListener('dragleave', () => {
+        ffmDragCounter = Math.max(0, ffmDragCounter - 1);
+        if (ffmDragCounter === 0 && ffmDragOverlay) ffmDragOverlay.classList.remove('active');
+    });
+    document.addEventListener('dragover', (e) => { e.preventDefault(); });
+    document.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        ffmDragCounter = 0;
+        if (ffmDragOverlay) ffmDragOverlay.classList.remove('active');
+        const files = Array.from(e.dataTransfer.files || []);
+        if (files.length) await uploadFiles(files);
+    });
 </script>
 </body>
 </html>
