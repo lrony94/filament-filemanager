@@ -61,11 +61,25 @@ window.fileManagerPickerUploadComponent = function (opts) {
         return __io;
     }
 
-    function observeOrSetSrc(img, url) {
+    const FM_PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="100%" height="100%" fill="#f3f4f6"/><text x="50%" y="50%" font-size="10" fill="#9ca3af" text-anchor="middle" dominant-baseline="middle">no preview</text></svg>');
+
+    function observeOrSetSrc(img, url, fallbackUrl) {
         try {
             img.loading = 'lazy';
             img.decoding = 'async';
         } catch (e) {}
+        // Graceful fallback: if the (resized) thumbnail fails to load — e.g. the
+        // `_pc` variant has not been generated yet — try the original image, then a
+        // lightweight inline placeholder. Avoids permanently blank preview boxes.
+        img.addEventListener('error', function onErr() {
+            if (fallbackUrl && img.getAttribute('data-fb') !== '1' && img.src !== fallbackUrl) {
+                img.setAttribute('data-fb', '1');
+                img.src = fallbackUrl;
+                return;
+            }
+            img.removeEventListener('error', onErr);
+            if (img.src !== FM_PLACEHOLDER) img.src = FM_PLACEHOLDER;
+        });
         const io = getIO();
         if (io) {
             img.dataset.src = url;
@@ -277,9 +291,22 @@ window.fileManagerPickerUploadComponent = function (opts) {
         },
     };
 
+    // Signature = ordered list of stored paths. Used so the MutationObserver only
+    // does a full rebuild when items are actually added/removed — never on reorder.
+    let __fmSig = null;
+    function signatureOf(value) {
+        try {
+            const arr = parseValue(value) || [];
+            if (!Array.isArray(arr)) return String(value || '');
+            return JSON.stringify(arr.map(v => (v && typeof v === 'object') ? (v.path || v.url || '') : String(v || '')));
+        } catch (e) { return String(value || ''); }
+    }
+
     function renderPreview(value) {
         const el = document.getElementById(previewSelector);
         if (!el) return;
+
+        __fmSig = signatureOf(value);
 
         // Clear existing content
         el.innerHTML = '';
@@ -411,7 +438,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 img.style.objectFit = 'cover';
                 img.style.borderRadius = '8px';
                 img.style.display = 'block';
-                observeOrSetSrc(img, previewUrl);
+                const originForImg = origins ? (Array.isArray(origins) ? origins[0] : origins) : pth;
+                const fallbackImgUrl = buildPreviewLink(originForImg);
+                observeOrSetSrc(img, previewUrl, fallbackImgUrl);
                 a.appendChild(img);
                 itemDiv.appendChild(a);
 
@@ -476,9 +505,12 @@ window.fileManagerPickerUploadComponent = function (opts) {
                             try { cur = JSON.parse(el.value || '[]') || []; } catch(e){ cur = []; }
                             if (!Array.isArray(cur)) cur = [];
                             const pending = itemDiv.dataset && itemDiv.dataset.pendingAlt !== undefined ? itemDiv.dataset.pendingAlt : altInput.value;
+                            // Use the card's LIVE position (it may have been reordered in place),
+                            // not the stale render-time index, so alt is written to the right item.
+                            const liveIdx = itemDiv.parentElement ? Array.prototype.indexOf.call(itemDiv.parentElement.children, itemDiv) : idx;
                             cur = cur.map((it, i) => {
-                                if (typeof it === 'string') return { path: it, alt: (i===idx ? pending : '') };
-                                return { path: (it.path || it.url || ''), alt: (i===idx ? pending : (it.alt || '')) };
+                                if (typeof it === 'string') return { path: it, alt: (i===liveIdx ? pending : '') };
+                                return { path: (it.path || it.url || ''), alt: (i===liveIdx ? pending : (it.alt || '')) };
                             });
                             el.value = JSON.stringify(cur);
                             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -518,7 +550,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
                     ch.setAttribute('draggable', 'true');
                     ch.setAttribute('data-idx', i);
                     ch.addEventListener('dragstart', function(ev){
-                        try { ev.dataTransfer.setData('text/plain', String(i)); } catch(e){}
+                        try { ev.dataTransfer.setData('text/plain', String(ch.getAttribute('data-idx'))); } catch(e){}
                         ch.style.opacity = '0.5';
                         try {
                             const img = ch.querySelector('img');
@@ -536,14 +568,29 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 });
             }
 
-            function removeHighlights(){ Array.from(wrapper.querySelectorAll('[data-idx]')).forEach(function(c){ c.style.outline=''; c.style.boxShadow=''; }); }
+            // Only iterate the item cards (direct children), and only the ones
+            // currently highlighted, so this stays cheap during a drag.
+            function removeHighlights(){ Array.from(wrapper.children).forEach(function(c){ if (c.style.outline) { c.style.outline=''; c.style.boxShadow=''; } }); }
+
+            // Renumber the item cards (and their delete buttons) after an in-place move.
+            function renumber(){
+                Array.from(wrapper.children).forEach(function(n, i){
+                    n.setAttribute('data-idx', i);
+                    const del = n.querySelector('.fm-delete');
+                    if (del) del.setAttribute('data-idx', i);
+                });
+            }
 
             if (!isDisabled) {
+                let lastOver = null;
                 wrapper.addEventListener('dragover', function(ev){
                     ev.preventDefault();
                     try {
-                        const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
+                        const targetEl = ev.target.closest && ev.target.closest('[draggable="true"]');
+                        // Throttle: only touch the DOM when the hovered card actually changes.
+                        if (targetEl === lastOver) return;
                         removeHighlights();
+                        lastOver = targetEl;
                         if (targetEl) {
                             targetEl.style.outline = '3px dashed rgba(37,99,235,0.9)';
                             targetEl.style.boxShadow = '0 6px 18px rgba(37,99,235,0.12)';
@@ -552,24 +599,22 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 });
                 wrapper.addEventListener('drop', function(ev){
                     ev.preventDefault();
+                    lastOver = null;
                     try {
                         const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
                         if (Number.isNaN(from)) return;
-                        const targetEl = ev.target.closest && ev.target.closest('[data-idx]');
-                        let to = null;
-                        if (targetEl) to = parseInt(targetEl.getAttribute('data-idx'), 10);
-                        else to = wrapper.children.length - 1;
-                        if (Number.isNaN(to) || from === to) return;
+                        const targetEl = ev.target.closest && ev.target.closest('[draggable="true"]');
+                        let to = targetEl ? parseInt(targetEl.getAttribute('data-idx'), 10) : (wrapper.children.length - 1);
+                        if (Number.isNaN(to) || from === to) { removeHighlights(); return; }
 
+                        // 1) Update the hidden input (source of truth) and previewData order.
                         const inp = document.getElementById(inputId);
                         if (!inp) return;
                         let arrCur = [];
                         try { arrCur = JSON.parse(inp.value || '[]') || []; } catch(e){ arrCur = []; }
-                        const newArr = moveArray(arrCur, from, to);
-                        inp.value = JSON.stringify(newArr);
+                        inp.value = JSON.stringify(moveArray(arrCur, from, to));
                         inp.dispatchEvent(new Event('input', { bubbles: true }));
                         inp.dispatchEvent(new Event('change', { bubbles: true }));
-
                         try {
                             if (previewData) {
                                 if (Array.isArray(previewData)) {
@@ -577,14 +622,23 @@ window.fileManagerPickerUploadComponent = function (opts) {
                                 } else if (Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
                                     previewData.thumb = moveArray(previewData.thumb, from, to);
                                     previewData.origin = moveArray(previewData.origin, from, to);
-                                    if (Array.isArray(previewData.alt)) {
-                                        previewData.alt = moveArray(previewData.alt, from, to);
-                                    }
+                                    if (Array.isArray(previewData.alt)) previewData.alt = moveArray(previewData.alt, from, to);
                                 }
                             }
                         } catch (e) { console.error(e); }
 
-                        renderPreview(inp.value);
+                        // 2) Move the DOM node in place — NO teardown/rebuild, NO image re-fetch.
+                        //    This is what keeps reordering instant and flicker-free.
+                        const nodes = Array.from(wrapper.children);
+                        const moving = nodes[from];
+                        const ref = nodes[to];
+                        if (moving && ref) {
+                            if (from < to) ref.after(moving); else ref.before(moving);
+                        }
+                        renumber();
+                        removeHighlights();
+                        // Keep the signature guard in sync so the observer doesn't rebuild.
+                        try { __fmSig = signatureOf(inp.value); } catch (e) {}
                     } catch (e) { console.error(e); }
                 });
             }
@@ -799,7 +853,16 @@ window.fileManagerPickerUploadComponent = function (opts) {
             if (!el) return;
             renderPreview(el.value);
 
-            const observer = new MutationObserver(() => renderPreview(el.value));
+            __fmSig = signatureOf(el.value);
+            let __obTimer = null;
+            const observer = new MutationObserver(() => {
+                if (__obTimer) clearTimeout(__obTimer);
+                __obTimer = setTimeout(() => {
+                    const sig = signatureOf(el.value);
+                    if (sig === __fmSig) return;   // reorder / no-op → skip full rebuild
+                    renderPreview(el.value);
+                }, 50);
+            });
             try { observer.observe(el, { attributes: true, childList: true, subtree: true }); } catch (e) {}
 
             try {
