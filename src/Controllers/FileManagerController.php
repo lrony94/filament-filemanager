@@ -25,6 +25,7 @@ class FileManagerController
                 Route::get('/file-manager/serve/{path}', [self::class, 'serveFile'])->where('path', '.*')->name('file-manager.serve');
                 Route::get('/file-manager/download/{path}', [self::class, 'downloadFile'])->where('path', '.*')->name('file-manager.download');
                 Route::get('/file-preview/{encodedPath}', [self::class, 'previewFile'])->where('encodedPath', '.*')->name('filament-filemanager.file-preview');
+                Route::get('/file-thumb/{encodedPath}', [self::class, 'thumbnail'])->where('encodedPath', '.*')->name('filament-filemanager.file-thumb');
 
             });
     }
@@ -304,6 +305,215 @@ class FileManagerController
         }
     }
 
+    /**
+     * Serve a small, disk-cached thumbnail for grid previews.
+     *
+     * The picker grid renders 120x90 cells; without this it would download the
+     * full-size source (which can be a multi-megapixel original before the app's
+     * resize job has produced a display variant), freezing the tab. This endpoint
+     * generates a bounded-width JPEG once, caches it, and serves ~10KB thereafter.
+     */
+    public function thumbnail(Request $request, string $encodedPath)
+    {
+        try {
+            $disk = config('filament-filemanager.disk', 'local');
+            $rawPath = (string) base64_decode(strtr($encodedPath, '-_', '+/'));
+
+            $absolute = null;
+            $resolved = $this->resolveConfiguredPath($disk, $rawPath, static fn (string $p): bool => is_file($p));
+            if ($resolved !== null) {
+                $absolute = $resolved['absolute'];
+            } else {
+                $normalizedPath = $this->decodeRelativePath($rawPath);
+                if ($normalizedPath !== '' && $disk === 'local' && Storage::disk($disk)->exists($normalizedPath)) {
+                    $candidate = Storage::disk($disk)->path($normalizedPath);
+                    if (is_file($candidate)) {
+                        $absolute = $candidate;
+                    }
+                }
+            }
+
+            if ($absolute === null || !is_file($absolute)) {
+                abort(404, 'File not found');
+            }
+
+            $width = (int) $request->query('w', (int) config('filament-filemanager.thumb_width', 240));
+            $width = $this->normalizeThumbWidth($width);
+
+            $cacheFile = $this->thumbnailCacheFile($disk, $absolute, $width);
+
+            if (!is_file($cacheFile)) {
+                $this->generateThumbnail($absolute, $cacheFile, $width);
+            }
+
+            if (is_file($cacheFile)) {
+                return response()->file($cacheFile, [
+                    'Content-Type' => 'image/jpeg',
+                    'Cache-Control' => 'public, max-age=86400',
+                ]);
+            }
+
+            // Generation failed (unsupported format etc.) — serve the source inline.
+            $mimeType = mime_content_type($absolute) ?: 'application/octet-stream';
+            return response()->file($absolute, [
+                'Content-Type' => $mimeType,
+                'Cache-Control' => 'public, max-age=3600',
+            ]);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
+            throw $e; // let intended 404s (missing file) propagate as-is
+        } catch (\Throwable $e) {
+            abort(500, 'Thumbnail error: ' . $e->getMessage());
+        }
+    }
+
+    protected function normalizeThumbWidth(int $width): int
+    {
+        return max(48, min(640, $width));
+    }
+
+    protected function thumbnailCacheFile(string $disk, string $absolute, int $width): string
+    {
+        $cacheDir = Storage::disk($disk)->path('.ffm-thumbs');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        // Canonicalize the path so pre-warm (upload) and on-demand (serve) always
+        // derive the SAME key, regardless of how the absolute path string was built
+        // (trailing slash from Storage::path('') vs storage_path(), storage/ vs
+        // public/ symlink, etc.). Without this the two write to different keys and
+        // the pre-warm is silently wasted.
+        $canonical = realpath($absolute) ?: $absolute;
+        $key = sha1($canonical . '|' . (@filemtime($absolute) ?: 0) . '|' . $width);
+
+        return $cacheDir . DIRECTORY_SEPARATOR . $key . '.jpg';
+    }
+
+    /**
+     * Pre-generate and cache a thumbnail for a source file (best-effort). Called at
+     * upload time so the grid's /file-thumb requests are cache hits (~ms) instead of
+     * each triggering a multi-second on-demand generation that holds a PHP-FPM worker
+     * and starves the form's Save request. Never throws — upload must not fail on this.
+     */
+    protected function warmThumbnail(string $disk, string $absolute, ?int $width = null): void
+    {
+        try {
+            if (!is_file($absolute)) {
+                return;
+            }
+            $width = $this->normalizeThumbWidth($width ?? (int) config('filament-filemanager.thumb_width', 240));
+            $cacheFile = $this->thumbnailCacheFile($disk, $absolute, $width);
+            if (!is_file($cacheFile)) {
+                $this->generateThumbnail($absolute, $cacheFile, $width);
+            }
+        } catch (\Throwable $_) {
+            // best-effort; the on-demand endpoint will still generate it later
+        }
+    }
+
+    /**
+     * Generate a bounded-width JPEG thumbnail. Prefers Imagick (with a JPEG
+     * shrink-on-load hint so huge sources decode cheaply); falls back to GD.
+     */
+    protected function generateThumbnail(string $src, string $dst, int $width): void
+    {
+        // --- Imagick (preferred) ---
+        if (class_exists(\Imagick::class)) {
+            try {
+                $img = new \Imagick();
+                try { $img->setResourceLimit(\Imagick::RESOURCETYPE_THREAD, 1); } catch (\Throwable $_) {}
+                // Hint libjpeg to decode at a reduced scale — massive win for large JPEGs.
+                try { $img->setOption('jpeg:size', $width . 'x'); } catch (\Throwable $_) {}
+                // Read only the first frame (handles animated GIF / multi-layer sources).
+                $img->readImage($src . '[0]');
+                if (method_exists($img, 'setImageColorspace')) {
+                    try { $img->setImageColorspace(\Imagick::COLORSPACE_SRGB); } catch (\Throwable $_) {}
+                }
+                // Flatten possible transparency onto white before JPEG encode.
+                try {
+                    $img->setImageBackgroundColor('white');
+                    $img = $img->mergeImageLayers(\Imagick::LAYERMETHOD_FLATTEN);
+                } catch (\Throwable $_) {}
+                $img->thumbnailImage($width, 0);
+                $img->setImageFormat('jpeg');
+                $img->setImageCompressionQuality(78);
+                try { $img->stripImage(); } catch (\Throwable $_) {}
+                file_put_contents($dst, $img->getImageBlob());
+                $img->clear();
+                $img->destroy();
+                return;
+            } catch (\Throwable $e) {
+                // fall through to CLI / GD
+            }
+        }
+
+        // --- ImageMagick CLI (preferred when the Imagick PHP ext is absent) ---
+        // `jpeg:size` decodes huge JPEGs at reduced scale; `[0]` takes the first
+        // frame (animated GIF / multi-layer). Array args avoid shell-escaping issues
+        // with spaces in paths.
+        if (class_exists(\Symfony\Component\Process\Process::class)) {
+            foreach (['convert', 'magick'] as $bin) {
+                try {
+                    $process = new \Symfony\Component\Process\Process([
+                        $bin,
+                        // Bound resource use so a huge PNG (no shrink-on-load) can't
+                        // exhaust RAM; excess spills to a memory-mapped file.
+                        '-limit', 'memory', '256MiB',
+                        '-limit', 'map', '512MiB',
+                        '-limit', 'thread', '1',
+                        '-define', 'jpeg:size=' . $width . 'x', // shrink-on-load (JPEG only)
+                        $src . '[0]',
+                        '-thumbnail', $width . 'x',
+                        '-background', 'white',
+                        '-flatten',
+                        '-strip',
+                        '-quality', '78',
+                        $dst,
+                    ]);
+                    $process->setTimeout(20);
+                    $process->run();
+                    if ($process->isSuccessful() && is_file($dst)) {
+                        return;
+                    }
+                } catch (\Throwable $e) {
+                    // try next binary / fall through to GD
+                }
+            }
+        }
+
+        // --- GD fallback ---
+        try {
+            $info = @getimagesize($src);
+            if (!$info) {
+                return;
+            }
+            [$w0, $h0] = $info;
+            if ($w0 < 1 || $h0 < 1) {
+                return;
+            }
+            switch ($info[2]) {
+                case IMAGETYPE_JPEG: $srcImg = @imagecreatefromjpeg($src); break;
+                case IMAGETYPE_PNG:  $srcImg = @imagecreatefrompng($src); break;
+                case IMAGETYPE_GIF:  $srcImg = @imagecreatefromgif($src); break;
+                case IMAGETYPE_WEBP: $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
+                default: $srcImg = false;
+            }
+            if (!$srcImg) {
+                return;
+            }
+            $tw = max(1, $width);
+            $th = max(1, (int) round($h0 * ($width / $w0)));
+            $dstImg = imagecreatetruecolor($tw, $th);
+            $white = imagecolorallocate($dstImg, 255, 255, 255);
+            imagefilledrectangle($dstImg, 0, 0, $tw, $th, $white);
+            imagecopyresampled($dstImg, $srcImg, 0, 0, 0, 0, $tw, $th, $w0, $h0);
+            imagejpeg($dstImg, $dst, 78);
+            imagedestroy($srcImg);
+            imagedestroy($dstImg);
+        } catch (\Throwable $e) {
+            // give up silently; caller serves the source
+        }
+    }
+
     public function downloadFile(Request $request, $path)
     {
         $disk = config('filament-filemanager.disk', 'local');
@@ -455,6 +665,17 @@ class FileManagerController
         $fullPath = $directory . DIRECTORY_SEPARATOR . $safeName;
         $size = @filesize($fullPath) ?: 0;
         $mtime = @filemtime($fullPath) ?: null;
+
+        // Pre-warm the grid thumbnail now so the picker renders from cache instead of
+        // triggering a slow on-demand generation per image (which would hog the few
+        // PHP-FPM workers and block the form's Save). Best-effort; only for images.
+        if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true)) {
+            // Warm BOTH render widths so first view hits cache regardless of mode:
+            // the multi grid / list use the default (240), the single-image preview
+            // uses 480 (matches the picker blade's `?w=480`).
+            $this->warmThumbnail($disk, $fullPath);
+            $this->warmThumbnail($disk, $fullPath, 480);
+        }
 
         // Build a public URL for the file if the disk supports it, otherwise fall back to serve route
         if ($disk === 'local') {
@@ -611,29 +832,20 @@ class FileManagerController
                 return response()->json(['ok' => false, 'error' => 'File or directory not writable'], 403);
             }
             if (is_dir($target)) {
-                $files = new \RecursiveIteratorIterator(
-                    new \RecursiveDirectoryIterator($target, \FilesystemIterator::SKIP_DOTS),
-                    \RecursiveIteratorIterator::CHILD_FIRST
-                );
-                $success = true;
-                foreach ($files as $file) {
-                    $filePath = $file->getRealPath();
-                    if ($file->isDir()) {
-                        if (!rmdir($filePath)) {
-                            $success = false;
-                            break;
-                        }
-                    } else {
-                        if (!unlink($filePath)) {
-                            $success = false;
-                            break;
-                        }
-                    }
+                // Refuse to delete a folder that still has contents — the user must
+                // clear it first. Only empty folders may be removed.
+                $hasChildren = false;
+                foreach (new \FilesystemIterator($target, \FilesystemIterator::SKIP_DOTS) as $_child) {
+                    $hasChildren = true;
+                    break;
                 }
-                if ($success && !rmdir($target)) {
-                    $success = false;
+                if ($hasChildren) {
+                    return response()->json([
+                        'ok' => false,
+                        'error' => 'Folder is not empty. Delete its files first.',
+                    ], 409);
                 }
-                if (!$success) {
+                if (!rmdir($target)) {
                     throw new \Exception('Failed to delete directory');
                 }
             } else {

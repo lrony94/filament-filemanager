@@ -37,7 +37,39 @@ window.fileManagerPickerUploadComponent = function (opts) {
         previewData,
     } = opts;
 
-    // 共享 IntersectionObserver，懒加载图片
+    // Bounded-concurrency thumbnail loader. Each /file-thumb request may generate
+    // the thumbnail on demand, holding a PHP-FPM worker for the whole request. With
+    // only a handful of workers, letting the whole grid load at once saturates them
+    // and starves the form's Save (Livewire POST) — the user then "can't save until
+    // images load". Capping in-flight requests always leaves workers free for Save.
+    const THUMB_MAX_CONCURRENT = 3;
+    let __thumbActive = 0;
+    const __thumbQueue = [];
+    function pumpThumbs() {
+        while (__thumbActive < THUMB_MAX_CONCURRENT && __thumbQueue.length) {
+            const img = __thumbQueue.shift();
+            if (!img || img._loaded || !img.dataset || !img.dataset.src) continue;
+            const url = img.dataset.src;
+            __thumbActive++;
+            const release = function () {
+                img.removeEventListener('load', release);
+                img.removeEventListener('error', release);
+                __thumbActive--;
+                pumpThumbs();
+            };
+            img.addEventListener('load', release);
+            img.addEventListener('error', release);
+            img._loaded = true;
+            delete img.dataset.src;
+            img.src = url;
+        }
+    }
+    function queueThumb(img) {
+        __thumbQueue.push(img);
+        pumpThumbs();
+    }
+
+    // 共享 IntersectionObserver，懒加载图片（经并发队列限流）
     let __io = null;
     function getIO() {
         if (__io !== null) return __io;
@@ -48,9 +80,7 @@ window.fileManagerPickerUploadComponent = function (opts) {
                         const img = e.target;
                         try {
                             if (img && img.dataset && img.dataset.src && !img._loaded) {
-                                img.src = img.dataset.src;
-                                img._loaded = true;
-                                delete img.dataset.src;
+                                queueThumb(img);
                             }
                         } catch (err) {}
                         obs.unobserve(img);
@@ -63,22 +93,32 @@ window.fileManagerPickerUploadComponent = function (opts) {
 
     const FM_PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="100%" height="100%" fill="#f3f4f6"/><text x="50%" y="50%" font-size="10" fill="#9ca3af" text-anchor="middle" dominant-baseline="middle">no preview</text></svg>');
 
-    function observeOrSetSrc(img, url, fallbackUrl) {
+    // Inject the loading-skeleton shimmer keyframes once.
+    (function ensureSkelStyle(){
+        try {
+            if (typeof document !== 'undefined' && !document.getElementById('fm-skel-style')) {
+                const st = document.createElement('style');
+                st.id = 'fm-skel-style';
+                st.textContent = '@keyframes fmShimmer{0%{background-position:100% 0}100%{background-position:0 0}}';
+                document.head.appendChild(st);
+            }
+        } catch (e) {}
+    })();
+
+    // Lazy-load an image (IntersectionObserver), fading it in on load and removing
+    // the loading skeleton. On failure show a lightweight placeholder — we never
+    // fall back to the full-size source (that is what used to freeze the page).
+    function observeOrSetSrc(img, url, skel) {
         try {
             img.loading = 'lazy';
             img.decoding = 'async';
         } catch (e) {}
-        // Graceful fallback: if the (resized) thumbnail fails to load — e.g. the
-        // `_pc` variant has not been generated yet — try the original image, then a
-        // lightweight inline placeholder. Avoids permanently blank preview boxes.
+        const done = () => { try { if (skel) skel.remove(); } catch (e) {} };
+        img.addEventListener('load', function () { img.style.opacity = '1'; done(); });
         img.addEventListener('error', function onErr() {
-            if (fallbackUrl && img.getAttribute('data-fb') !== '1' && img.src !== fallbackUrl) {
-                img.setAttribute('data-fb', '1');
-                img.src = fallbackUrl;
-                return;
-            }
             img.removeEventListener('error', onErr);
-            if (img.src !== FM_PLACEHOLDER) img.src = FM_PLACEHOLDER;
+            done();
+            if (img.src !== FM_PLACEHOLDER) { img.src = FM_PLACEHOLDER; img.style.opacity = '1'; }
         });
         const io = getIO();
         if (io) {
@@ -218,6 +258,22 @@ window.fileManagerPickerUploadComponent = function (opts) {
             : ('/filament-filemanager/file-manager/download/' + encodeURIComponent(String(localPath)));
     }
 
+    // Build a URL to the small, disk-cached thumbnail endpoint. The grid always
+    // loads these (~10KB) instead of the full-size source, regardless of how large
+    // the original is or whether a display variant has been generated yet.
+    function buildThumbLink(value) {
+        if (!value) return null;
+        const raw = String(value).trim();
+        if (!raw) return null;
+        // External URLs can't be re-thumbnailed server-side; use as-is.
+        if (isExternalUrl(raw)) return raw;
+        let p = normalizeLocalRoutePath(raw);        // strip protocol/host
+        p = p.replace(/^\/+/, '');                   // drop leading slash
+        p = p.replace(/^(storage|public)\//i, '');   // drop public-disk web prefix
+        const encoded = btoa(unescape(encodeURIComponent(String(p)))).replace(/=/g, '');
+        return '/filament-filemanager/file-thumb/' + encoded;
+    }
+
     // API methods (closure-scoped) — will be invoked via event delegation
     const api = {
         removeIndex(idx) {
@@ -338,7 +394,9 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 try {
                     if (previewData) {
                         if (Array.isArray(previewData)) {
-                            const item = previewData[idx] || previewData.find(p => p && ((p.value === pth) || (p.value === String(pth))));
+                            // Match by PATH only — never by positional index, or a
+                            // re-selected item would inherit the previous item's image.
+                            const item = previewData.find(p => p && ((p.value === pth) || (p.value === String(pth))));
                             if (item) { thumbs = item.thumb || null; origins = item.origin || null; }
                         } else if (previewData.thumb && previewData.origin && Array.isArray(previewData.thumb) && Array.isArray(previewData.origin)) {
                             let idx2 = -1;
@@ -348,36 +406,35 @@ window.fileManagerPickerUploadComponent = function (opts) {
                                 idx2 = originsArr.findIndex(o => String(o) === pth);
                                 if (idx2 < 0) { idx2 = originsArr.findIndex(o => normalizePath(o) === nPth); }
                                 if (idx2 < 0) {
-                                    const base = nPth.split('/').pop();
-                                    idx2 = originsArr.findIndex(o => String(o).split('/').pop() === base);
-                                }
-                                if (idx2 < 0) {
                                     const thumbsArr = Array.isArray(previewData.thumb) ? previewData.thumb : [];
-                                    idx2 = thumbsArr.findIndex(t => String(t) === pth || normalizePath(t) === nPth || String(t).split('/').pop() === nPth.split('/').pop());
+                                    idx2 = thumbsArr.findIndex(t => String(t) === pth || normalizePath(t) === nPth);
                                 }
-                                if (idx2 < 0 && Array.isArray(previewData.origin) && idx < previewData.origin.length) {
-                                    idx2 = idx;
-                                }
+                                // Match by FULL path only (exact or normalized). Basename
+                                // matching was removed so two files with the same name in
+                                // different folders never share a preview/thumbnail.
+                                // NOTE: intentionally NO positional-index fallback here.
+                                // previewData is built from the value at initial page load;
+                                // after a clear + re-select the value changes but previewData
+                                // is stale, so a positional match would show the previous
+                                // image under the new name. If the path doesn't match, we let
+                                // the item fall back to its own path's thumbnail below.
                             } catch (e) { idx2 = -1; }
 
                             const tArr = Array.isArray(previewData.thumb) ? previewData.thumb : [];
                             const oArr = Array.isArray(previewData.origin) ? previewData.origin : [];
-                            thumbs = (idx2 >= 0 && idx2 < tArr.length) ? tArr[idx2] : (tArr[idx] || null);
-                            origins = (idx2 >= 0 && idx2 < oArr.length) ? oArr[idx2] : (oArr[idx] || null);
+                            thumbs = (idx2 >= 0 && idx2 < tArr.length) ? tArr[idx2] : null;
+                            origins = (idx2 >= 0 && idx2 < oArr.length) ? oArr[idx2] : null;
                             const aArr = Array.isArray(previewData.alt) ? previewData.alt : [];
-                            if (!altVal && aArr.length) {
-                                altVal = (idx2 >= 0 && idx2 < aArr.length) ? (aArr[idx2] || '') : (aArr[idx] || '');
+                            if (!altVal && aArr.length && idx2 >= 0 && idx2 < aArr.length) {
+                                altVal = aArr[idx2] || '';
                             }
                         } else {
                             let entry = previewData[pth];
                             if (!entry) {
                                 const nPth = normalizePath(pth);
                                 const keys = Object.keys(previewData || {});
+                                // Full-path match only — no basename fallback (see above).
                                 entry = keys.map(k => [k, previewData[k]]).find(([k]) => normalizePath(k) === nPth)?.[1];
-                                if (!entry) {
-                                    const base = nPth.split('/').pop();
-                                    entry = keys.map(k => [k, previewData[k]]).find(([k]) => (normalizePath(k).split('/').pop() === base))?.[1];
-                                }
                             }
                             if (entry) {
                                 thumbs = entry.thumb || null;
@@ -427,10 +484,24 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 itemDiv.style.background = '#fff';
                 itemDiv.style.boxShadow = '0 1px 2px rgba(0,0,0,0.04)';
 
+                const originForImg = origins ? (Array.isArray(origins) ? origins[0] : origins) : pth;
+
                 const a = document.createElement('a');
-                a.href = previewUrl;
+                a.href = buildPreviewLink(originForImg) || previewUrl;   // click opens the full image
                 a.target = '_blank';
                 a.style.display = 'block';
+                a.style.position = 'relative';
+                // Never let the link/image become the native drag source — otherwise a
+                // not-yet-loaded card drags the <a> href (text/plain becomes the URL, so
+                // drop's parseInt() is NaN and reorder is skipped). Only the card (itemDiv)
+                // should be draggable, so drag works uniformly regardless of load state.
+                a.draggable = false;
+
+                // loading skeleton, shown until the (cached) thumbnail resolves
+                const skel = document.createElement('div');
+                skel.className = 'fm-skel';
+                skel.style.cssText = 'position:absolute;inset:0;width:120px;height:90px;border-radius:8px;background:linear-gradient(90deg,#eeeeee 25%,#f6f6f6 37%,#eeeeee 63%);background-size:400% 100%;animation:fmShimmer 1.2s ease-in-out infinite;';
+                a.appendChild(skel);
 
                 const img = document.createElement('img');
                 img.style.width = '120px';
@@ -438,9 +509,12 @@ window.fileManagerPickerUploadComponent = function (opts) {
                 img.style.objectFit = 'cover';
                 img.style.borderRadius = '8px';
                 img.style.display = 'block';
-                const originForImg = origins ? (Array.isArray(origins) ? origins[0] : origins) : pth;
-                const fallbackImgUrl = buildPreviewLink(originForImg);
-                observeOrSetSrc(img, previewUrl, fallbackImgUrl);
+                img.style.opacity = '0';
+                img.style.transition = 'opacity .2s ease';
+                img.draggable = false;
+                // Always load a small, disk-cached thumbnail of the source — never the
+                // full-size image. This is what keeps many/large photos from freezing.
+                observeOrSetSrc(img, buildThumbLink(originForImg), skel);
                 a.appendChild(img);
                 itemDiv.appendChild(a);
 
@@ -709,7 +783,24 @@ window.fileManagerPickerUploadComponent = function (opts) {
         const img2 = document.createElement('img');
         img2.style.maxWidth = '100%'; img2.style.maxHeight = '280px'; img2.style.borderRadius = '8px';
         img2.style.objectFit = 'contain';
-        observeOrSetSrc(img2, u);
+        // Inline preview loads a small cached thumbnail (not the full original); the
+        // wrapping link (a2.href = u) still opens the full image. A single image can
+        // safely fall back to the full source if the thumbnail can't be produced
+        // (unlike the multi grid, where that fallback is what caused the freeze).
+        img2.loading = 'lazy'; img2.decoding = 'async';
+        img2.style.opacity = '0'; img2.style.transition = 'opacity .2s ease';
+        img2.addEventListener('load', function(){ img2.style.opacity = '1'; });
+        let previewImgSrc = u;
+        const thumbLink = buildThumbLink(singleOrigin || value);
+        if (thumbLink && thumbLink.indexOf('/file-thumb/') !== -1) {
+            previewImgSrc = thumbLink + '?w=480';
+            img2.addEventListener('error', function onThumbErr(){
+                img2.removeEventListener('error', onThumbErr);
+                if (u && img2.getAttribute('src') !== u) { img2.src = u; }
+                else { img2.style.opacity = '1'; }
+            });
+        }
+        img2.src = previewImgSrc;
         a2.appendChild(img2);
         box.appendChild(a2);
 

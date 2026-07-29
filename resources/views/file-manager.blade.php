@@ -209,15 +209,20 @@
 
         .selection-bar {
             display: none;
-            position: sticky;
+            /* Fixed (not sticky): a sticky bar only pins once you scroll past its
+               flow position, so it "drops down" below the header until then. Fixed
+               keeps this contextual action bar reliably at the very top whenever a
+               selection is active, regardless of scroll position. */
+            position: fixed;
             top: 0;
-            z-index: 15;
+            left: 0;
+            right: 0;
+            z-index: 30;
             background: #111827;
             color: #fff;
             border-bottom: 1px solid #111827;
-            padding: 10px 12px;
-            margin: -16px;
-            margin-bottom: 12px;
+            padding: 10px 16px;
+            box-sizing: border-box;
             align-items: center;
             justify-content: space-between;
         }
@@ -478,6 +483,19 @@
             .replace(/^\/+|\/+$/g, ''); // trim leading/trailing slashes
     }
 
+    function downloadOriginal(path) {
+        // `path` is the URL-encoded relative path (f.path), same form the serve/thumb
+        // routes use. Hit the attachment route so the browser downloads the ORIGINAL
+        // file (never the thumbnail) without navigating this popup away.
+        if (!path) return;
+        const a = document.createElement('a');
+        a.href = '/filament-filemanager/file-manager/download/' + path;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
     async function renameItem(path, isDir) {
         const newName = prompt('New name');
         if (!newName) return;
@@ -681,7 +699,7 @@
                 const isImg = f._type === 'file' && imageExts.includes(f.ext);
                 const icon = f._type === 'dir'
                     ? `<span style="display:inline-flex;width:28px;height:28px;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></span>`
-                    : (isImg ? `<img src="/filament-filemanager/file-preview/${base64url(f.path)}" loading="lazy" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:8px;">` : `<span style="display:inline-flex;width:28px;height:28px;border:1px solid #e5e7eb;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;">📄</span>`);
+                    : (isImg ? `<img src="/filament-filemanager/file-thumb/${base64url(f.path)}" loading="lazy" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:8px;">` : `<span style="display:inline-flex;width:28px;height:28px;border:1px solid #e5e7eb;border-radius:4px;align-items:center;justify-content:center;margin-right:8px;">📄</span>`);
                 const mid = base64Id(f.path);
                 const checkboxCell = f._type === 'file' ? `<input type=\"checkbox\" data-type=\"file\" data-path=\"${f.path}\" ${selected.has(f.path) ? 'checked' : ''}>` : '';
         tr.innerHTML = `
@@ -693,6 +711,7 @@
                             <div style=\"position:relative;display:inline-block;\">\n
                                 <button class=\"view-toggle\" onclick=\"toggleRowMenu(event,'${mid}')\">⋯</button>
                                 <div id=\"${mid}\" class=\"menu\" style=\"right:-6px; top:32px;\">\n
+                                    ${f._type === 'file' ? `<button onclick=\"downloadOriginal('${(f.path || '').replace(/'/g, "\\'")}'); hideMenus()\">Download</button>` : ''}
                                     <button onclick=\"renameItem('${f.path}', ${f._type === 'dir' ? 'true' : 'false'}); hideMenus()\">Rename</button>
                                     <button onclick=\"removeItem('${f.path}'); hideMenus()\">Delete</button>
                                 </div>
@@ -721,7 +740,7 @@
                 const isImg = f._type === 'file' && imageExts.includes(f.ext);
                 const content = f._type === 'dir'
                     ? `<div class="thumb"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="96" height="72"><path fill="#1d4ed8" d="M10 4l2 2h6a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h4z"/></svg></div>`
-                    : (isImg ? `<img class="thumb" loading="lazy" src="/filament-filemanager/file-preview/${base64url(f.path)}">` : `<div class="thumb"><span style="display:inline-flex;width:64px;height:64px;border:1px solid #e5e7eb;border-radius:8px;align-items:center;justify-content:center;">📄</span></div>`);
+                    : (isImg ? `<img class="thumb" loading="lazy" src="/filament-filemanager/file-thumb/${base64url(f.path)}">` : `<div class="thumb"><span style="display:inline-flex;width:64px;height:64px;border:1px solid #e5e7eb;border-radius:8px;align-items:center;justify-content:center;">📄</span></div>`);
                 card.innerHTML = `
                         ${content}
                         <div class="name">${f.name}</div>
@@ -755,7 +774,12 @@
         tbody.querySelectorAll('tr').forEach((tr, idx) => {
             const p = data[idx]?.path;
             if (!p) return;
-            tr.classList.toggle('row-selected', selected.has(p));
+            const isSel = selected.has(p);
+            tr.classList.toggle('row-selected', isSel);
+            // Keep the checkbox in sync with the selection, so clicking the file NAME
+            // (which toggles selection) also checks/unchecks its checkbox, and vice versa.
+            const cb = tr.querySelector('input[type="checkbox"][data-type="file"]');
+            if (cb) cb.checked = isSel;
         });
     }
 
