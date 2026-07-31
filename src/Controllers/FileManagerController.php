@@ -263,7 +263,7 @@ class FileManagerController
         }
     }
 
-    public function previewFile(string $encodedPath)
+    public function previewFile(Request $request, string $encodedPath)
     {
         try {
             $disk = config('filament-filemanager.disk', 'local');
@@ -273,10 +273,13 @@ class FileManagerController
             if ($resolved !== null) {
                 $mimeType = mime_content_type($resolved['absolute']) ?: 'application/octet-stream';
 
-                return response()->file($resolved['absolute'], [
-                    'Content-Type' => $mimeType,
-                    'Cache-Control' => 'public, max-age=3600',
-                ]);
+                return $this->conditionalFileResponse(
+                    $request,
+                    $resolved['absolute'],
+                    $mimeType,
+                    $resolved['absolute'],
+                    @filemtime($resolved['absolute']) ?: 0,
+                );
             }
 
             $normalizedPath = $this->decodeRelativePath($rawPath);
@@ -286,10 +289,13 @@ class FileManagerController
                     if (file_exists($filePath)) {
                         $mimeType = mime_content_type($filePath) ?: 'application/octet-stream';
 
-                        return response()->file($filePath, [
-                            'Content-Type' => $mimeType,
-                            'Cache-Control' => 'public, max-age=3600',
-                        ]);
+                        return $this->conditionalFileResponse(
+                            $request,
+                            $filePath,
+                            $mimeType,
+                            $filePath,
+                            @filemtime($filePath) ?: 0,
+                        );
                     }
                 }
 
@@ -300,6 +306,8 @@ class FileManagerController
             }
 
             abort(404, 'File not found');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
+            throw $e; // let intended 404s (missing file) propagate — mirror thumbnail()
         } catch (\Throwable $e) {
             abort(500, 'File preview error: ' . $e->getMessage());
         }
@@ -346,19 +354,27 @@ class FileManagerController
                 $this->generateThumbnail($absolute, $cacheFile, $width);
             }
 
+            $sourceMtime = @filemtime($absolute) ?: 0;
+
             if (is_file($cacheFile)) {
-                return response()->file($cacheFile, [
-                    'Content-Type' => 'image/jpeg',
-                    'Cache-Control' => 'public, max-age=86400',
-                ]);
+                return $this->conditionalFileResponse(
+                    $request,
+                    $cacheFile,
+                    'image/jpeg',
+                    $absolute . '|' . $width,
+                    $sourceMtime,
+                );
             }
 
             // Generation failed (unsupported format etc.) — serve the source inline.
             $mimeType = mime_content_type($absolute) ?: 'application/octet-stream';
-            return response()->file($absolute, [
-                'Content-Type' => $mimeType,
-                'Cache-Control' => 'public, max-age=3600',
-            ]);
+            return $this->conditionalFileResponse(
+                $request,
+                $absolute,
+                $mimeType,
+                $absolute,
+                $sourceMtime,
+            );
         } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
             throw $e; // let intended 404s (missing file) propagate as-is
         } catch (\Throwable $e) {
@@ -369,6 +385,43 @@ class FileManagerController
     protected function normalizeThumbWidth(int $width): int
     {
         return max(48, min(640, $width));
+    }
+
+    /**
+     * Serve a file with mtime-driven revalidation instead of a blind long-lived
+     * cache. The browser keeps the bytes but must revalidate before reuse; while
+     * the source is unchanged it gets a cheap 304, and the moment the source is
+     * replaced (same filename, new mtime) the ETag changes so the fresh content
+     * is fetched automatically — no Ctrl+F5, no stale thumbnails.
+     *
+     * @param  string  $etagSeed   Stable identity of the served content (source
+     *                             path, plus width for thumbnails).
+     * @param  int     $sourceMtime Modification time of the SOURCE file.
+     */
+    protected function conditionalFileResponse(
+        Request $request,
+        string $fileToServe,
+        string $contentType,
+        string $etagSeed,
+        int $sourceMtime
+    ) {
+        $response = response()->file($fileToServe, [
+            'Content-Type' => $contentType,
+        ]);
+
+        $response->setEtag(sha1($etagSeed . '|' . $sourceMtime));
+        if ($sourceMtime > 0) {
+            $response->setLastModified(\DateTimeImmutable::createFromFormat('U', (string) $sourceMtime) ?: null);
+        }
+        // no-cache = store but ALWAYS revalidate before reuse. private because the
+        // routes are auth-gated (no shared/proxy caching).
+        $response->headers->set('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+
+        // Turns the response into a 304 (empty body) when the client's
+        // If-None-Match / If-Modified-Since still match.
+        $response->isNotModified($request);
+
+        return $response;
     }
 
     protected function thumbnailCacheFile(string $disk, string $absolute, int $width): string
